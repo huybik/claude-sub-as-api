@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { RequestQueue } from './queue.mjs';
 import { ResponseReuse, reuseOptions } from './reuse.mjs';
-import { AnthropicMessage, anthropicError, prepareAnthropic, toolControl, validateAnthropic } from './anthropic.mjs';
+import { AnthropicMessage, anthropicError, prepareAnthropic, sessionContext, toolControl, validateAnthropic } from './anthropic.mjs';
 
 const directory = fileURLToPath(new URL('.', import.meta.url));
 const claude = 'claude';
@@ -39,6 +39,7 @@ if (!auth.loggedIn || auth.authMethod !== 'claude.ai' || auth.apiProvider !== 'f
 const queue = new RequestQueue(Number(process.env.CLAUDE_LOCAL_API_CONCURRENCY ?? 10));
 const activeCalls = new Set();
 const reuse = new ResponseReuse();
+let announced; // The account context Claude Code last announced to a first call.
 const usage = { started_at: new Date().toISOString(), claude_processes: 0, model_calls: 0, failed_processes: 0,
   input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
 const tokenFields = ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'];
@@ -68,11 +69,15 @@ function runClaude(args, prompt, signal, onText, bridge = {}) {
     const streamUsage = {};
     let failure, killTimer;
     let stopping = false, closed = false;
+    // Messages calls use the SDK control protocol on stdin; a continued tool turn sends no new prompt.
+    const control = 'userMessage' in bridge;
     const child = spawn(claude, args, { cwd: directory,
-      env: { ...env, ...(bridge.maxTokens ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(bridge.maxTokens) } : {}) } });
+      env: { ...env, ...bridge.env, ...(bridge.maxTokens ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(bridge.maxTokens) } : {}) } });
+    // Only the first stop decides the outcome: a client that disconnects after the
+    // captured message ends does not turn a delivered answer into a failure.
     function stop(error) {
-      failure ??= error;
       if (stopping || closed) return;
+      failure = error;
       stopping = true;
       clearTimeout(timeout);
       child.kill('SIGTERM');
@@ -93,7 +98,7 @@ function runClaude(args, prompt, signal, onText, bridge = {}) {
         }
         if (message.type === 'control_response' && message.response.request_id === 'local-init') {
           if (message.response.subtype !== 'success') throw fail(502, message.response.error || 'Claude initialization failed.');
-          send(bridge.userMessage);
+          if (bridge.userMessage) send(bridge.userMessage);
         }
         if (message.type === 'control_request') {
           const response = toolControl(message.request, bridge.tools ?? []);
@@ -101,7 +106,7 @@ function runClaude(args, prompt, signal, onText, bridge = {}) {
         }
         if (message.type === 'result') {
           result = message;
-          if (bridge.userMessage) child.stdin.end();
+          if (control) child.stdin.end();
         }
         if (message.type === 'stream_event' && !message.parent_tool_use_id && bridge.capture) {
           if (bridge.capture.accept(message.event)) stop();
@@ -152,7 +157,7 @@ function runClaude(args, prompt, signal, onText, bridge = {}) {
       if (!stopping && !result) stop(fail(502, `Cannot send input to Claude: ${error.message}`));
     });
     if (signal.aborted) { cancel(); return; }
-    if (bridge.userMessage) send({ type: 'control_request', request_id: 'local-init', request: {
+    if (control) send({ type: 'control_request', request_id: 'local-init', request: {
       subtype: 'initialize', hooks: {}, skills: [], systemPrompt: [bridge.system], systemPromptSnapshot: false,
     } });
     else child.stdin.end(prompt);
@@ -168,7 +173,7 @@ function baseArgs(model, tools = []) {
 }
 
 async function messagesRequest(input, response, signal, requestID) {
-  const prepared = prepareAnthropic(input, directory);
+  const prepared = prepareAnthropic(input, directory, announced);
   const emit = data => {
     if (!input.stream || response.destroyed) return;
     if (!response.headersSent) response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'request-id': requestID });
@@ -178,7 +183,7 @@ async function messagesRequest(input, response, signal, requestID) {
     const args = [...baseArgs(input.model, input.tools), ...prepared.args, '--permission-prompt-tool', 'stdio'];
     const capture = input.schema ? undefined : new AnthropicMessage(input.model, input.tools, emit);
     const result = await runClaude(args, '', signal, () => {}, {
-      userMessage: prepared.userMessage, system: input.system, tools: input.tools, maxTokens: input.max_tokens, capture,
+      userMessage: prepared.userMessage, env: prepared.env, system: input.system, tools: input.tools, maxTokens: input.max_tokens, capture,
     });
     let message;
     if (capture?.complete) message = capture.message;
@@ -199,7 +204,13 @@ async function messagesRequest(input, response, signal, requestID) {
     }
     if (input.stream) response.end();
     return message;
-  } finally { prepared.cleanup(); }
+  } finally {
+    prepared.cleanup();
+    if (prepared.sessionId) {
+      try { announced = sessionContext(prepared.sessionId) ?? announced; }
+      catch (error) { console.error(`Cannot read the session context: ${error.message}`); }
+    }
+  }
 }
 
 async function generateRequest(input, response, signal) {

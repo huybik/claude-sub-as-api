@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 const toolPrefix = 'mcp__client__';
@@ -11,6 +12,16 @@ function fields(value, allowed, label) {
   const extra = Object.keys(value).filter(key => !allowed.includes(key));
   if (extra.length) fail(`Unsupported ${label} fields: ${extra.join(', ')}.`);
 }
+function cacheControl(value) {
+  fields(value, ['type', 'ttl'], 'cache_control');
+  if (value.type !== 'ephemeral' || ![undefined, '5m', '1h'].includes(value.ttl)) fail('cache_control must be {"type": "ephemeral"} with an optional ttl of 5m or 1h.');
+  return { ...value };
+}
+function marked(block, original, nested) {
+  if (original.cache_control == null) return block;
+  if (nested) fail('cache_control is supported on message content blocks, system blocks, and tools; not inside tool results.');
+  return { ...block, cache_control: cacheControl(original.cache_control) };
+}
 
 function content(value, role, nested = false) {
   if (typeof value === 'string') return [{ type: 'text', text: value }];
@@ -19,14 +30,14 @@ function content(value, role, nested = false) {
     if (!object(block)) fail('Each content block must be an object.');
     switch (block.type) {
       case 'text': {
-        fields(block, ['type', 'text', 'citations'], 'text block');
+        fields(block, ['type', 'text', 'citations', 'cache_control'], 'text block');
         if (typeof block.text !== 'string') fail('Text blocks require text.');
         if (block.citations != null && (!Array.isArray(block.citations) || block.citations.length)) fail('Text citations are not supported.');
-        return { type: 'text', text: block.text };
+        return marked({ type: 'text', text: block.text }, block, nested && role !== 'system');
       }
       case 'image': {
         if (role !== 'user') fail('Image blocks must be in user messages.');
-        fields(block, ['type', 'source'], 'image block');
+        fields(block, ['type', 'source', 'cache_control'], 'image block');
         fields(block.source, ['type', 'media_type', 'data'], 'image source');
         const source = block.source;
         if (source.type !== 'base64' || !['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(source.media_type)) {
@@ -36,11 +47,11 @@ function content(value, role, nested = false) {
           fail('Image data must be valid base64.');
         }
         if (Buffer.byteLength(source.data, 'base64') > 5 * 1024 * 1024) fail('Each image must be at most 5 MiB.');
-        break;
+        return marked({ type: 'image', source: { ...source } }, block, nested);
       }
       case 'tool_use': {
         if (role !== 'assistant' || nested) fail('tool_use blocks must be in assistant messages.');
-        fields(block, ['type', 'id', 'name', 'input', 'caller', 'toolset_name'], 'tool_use block');
+        fields(block, ['type', 'id', 'name', 'input', 'caller', 'toolset_name', 'cache_control'], 'tool_use block');
         if (typeof block.id !== 'string' || !block.id || typeof block.name !== 'string' || !object(block.input)) fail('Invalid tool_use block.');
         if (block.caller != null) {
           fields(block.caller, ['type'], 'tool caller');
@@ -48,15 +59,17 @@ function content(value, role, nested = false) {
         }
         if (block.toolset_name != null) fail('Toolset member calls are not supported.');
         // SDK response objects include null optional fields; omit these on replay.
-        const { caller, toolset_name, ...tool } = block;
-        return caller == null ? tool : { ...tool, caller: { ...caller } };
+        const { caller, toolset_name, cache_control, ...tool } = block;
+        return marked(caller == null ? tool : { ...tool, caller: { ...caller } }, block, nested);
       }
-      case 'tool_result':
+      case 'tool_result': {
         if (role !== 'user' || nested) fail('tool_result blocks must be in user messages.');
-        fields(block, ['type', 'tool_use_id', 'content', 'is_error'], 'tool_result block');
+        fields(block, ['type', 'tool_use_id', 'content', 'is_error', 'cache_control'], 'tool_result block');
         if (typeof block.tool_use_id !== 'string' || !block.tool_use_id) fail('tool_result requires tool_use_id.');
         if (block.is_error !== undefined && typeof block.is_error !== 'boolean') fail('is_error must be boolean.');
-        return { ...block, content: content(block.content ?? '', 'user', true) };
+        const { cache_control, ...result } = block;
+        return marked({ ...result, content: content(block.content ?? '', 'user', true) }, block, nested);
+      }
       case 'thinking':
         if (role !== 'assistant' || nested) fail('Thinking blocks must be in assistant messages.');
         fields(block, ['type', 'thinking', 'signature'], 'thinking block');
@@ -74,7 +87,7 @@ function content(value, role, nested = false) {
 }
 
 export function validateAnthropic(input, models, efforts) {
-  fields(input, ['model', 'max_tokens', 'messages', 'system', 'stream', 'tools', 'tool_choice', 'output_config', 'thinking', 'stop_sequences', 'temperature'], 'request');
+  fields(input, ['model', 'max_tokens', 'messages', 'system', 'stream', 'tools', 'tool_choice', 'output_config', 'thinking', 'stop_sequences', 'temperature', 'cache_control'], 'request');
   if (!models.includes(input.model)) fail(`Choose a model: ${models.join(', ')}.`);
   if (!Number.isInteger(input.max_tokens) || input.max_tokens < 1 || input.max_tokens > 128000) fail('max_tokens must be an integer from 1 to 128000.');
   if (input.stream !== undefined && typeof input.stream !== 'boolean') fail('stream must be boolean.');
@@ -100,6 +113,11 @@ export function validateAnthropic(input, models, efforts) {
     else messages.push({ role: message.role, content: blocks });
   }
   if (messages[0]?.role !== 'user' || messages.at(-1)?.role !== 'user') fail('The non-system message list must start and end with a user message. Assistant prefills are not supported.');
+  // Automatic caching marks the end of the conversation, so the next turn reads it.
+  if (input.cache_control != null) {
+    const last = messages.at(-1).content;
+    last[last.length - 1] = { ...last.at(-1), cache_control: cacheControl(input.cache_control) };
+  }
   const pendingTools = new Set();
   const knownTools = new Set();
   for (const message of messages) {
@@ -120,7 +138,9 @@ export function validateAnthropic(input, models, efforts) {
   if (!Array.isArray(tools)) fail('tools must be a list.');
   const names = new Set();
   for (const tool of tools) {
-    fields(tool, ['name', 'description', 'input_schema'], 'tool');
+    // Claude Code builds the tool list; a message breakpoint caches it with the prompt before it.
+    fields(tool, ['name', 'description', 'input_schema', 'cache_control'], 'tool');
+    if (tool.cache_control != null) cacheControl(tool.cache_control);
     if (typeof tool.name !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(tool.name) || names.has(tool.name)) fail('Tool names must be unique and contain 1–64 letters, digits, underscores, or hyphens.');
     if (tool.description !== undefined && typeof tool.description !== 'string') fail('Tool description must be text.');
     if (!object(tool.input_schema) || tool.input_schema.type !== 'object') fail('Tool input_schema must have type object.');
@@ -150,11 +170,16 @@ export function validateAnthropic(input, models, efforts) {
   return { ...input, messages, system: systemParts.join('\n\n'), tools: input.tool_choice?.type === 'none' ? [] : tools, effort, schema };
 }
 
-export function prepareAnthropic(input, directory) {
+// Claude Code announces the account context before the first prompt it sees in a session.
+// A rebuilt history carries that announcement after its first message, where the conversation's
+// first call put it, so a follow-up's prompt starts with the same bytes and reads that call's cache.
+export function prepareAnthropic(input, directory, context) {
   const folder = mkdtempSync(join(directory, 'request-'));
   const cleanup = () => rmSync(folder, { recursive: true, force: true });
   try {
-    const args = ['--no-session-persistence', '--input-format', 'stream-json'];
+    // Only client breakpoints cache, as on the Messages API.
+    const env = { DISABLE_PROMPT_CACHING: '1' };
+    const args = ['--input-format', 'stream-json'];
     if (input.effort) args.push('--effort', input.effort);
     if (input.schema) args.push('--json-schema', JSON.stringify(input.schema));
     if (input.thinking) args.push('--thinking', input.thinking.type);
@@ -162,32 +187,55 @@ export function prepareAnthropic(input, directory) {
       block.type === 'tool_use' ? { ...block, name: toolPrefix + block.name } : block) }));
     const history = nativeMessages.slice(0, -1);
     let userMessage = nativeMessages.at(-1);
-    const results = userMessage.content.filter(block => block.type === 'tool_result');
-    if (results.length) {
-      // Resume repairs unanswered calls before stdin is read. Load their results first.
-      history.push({ role: 'user', content: results });
-      const remaining = userMessage.content.filter(block => block.type !== 'tool_result');
-      userMessage = { role: 'user', content: remaining.length ? remaining : [{ type: 'text', text: '' }] };
+    if (userMessage.content.some(block => block.type === 'tool_result')) {
+      // A new prompt after tool results makes resume insert a reply the model never wrote.
+      // Resume continues the interrupted turn instead, with a short meta note to continue.
+      history.push(userMessage);
+      userMessage = null;
+      env.CLAUDE_CODE_RESUME_INTERRUPTED_TURN = '1';
     }
+    let sessionId = randomUUID();
     if (history.length) {
-      const sessionId = randomUUID();
       let parentUuid = null;
-      const entries = history.map(message => {
+      const entry = data => {
         const uuid = randomUUID();
-        const entry = { parentUuid, uuid, sessionId, cwd: directory, isSidechain: false, userType: 'external',
-          timestamp: new Date().toISOString(), type: message.role, message: message.role === 'assistant'
-            ? { id: `msg_${uuid}`, type: 'message', model: input.model, ...message,
-              stop_reason: message.content.some(block => block.type === 'tool_use') ? 'tool_use' : 'end_turn',
-              stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } : message };
+        const line = JSON.stringify({ parentUuid, uuid, sessionId, cwd: directory, isSidechain: false, userType: 'external',
+          timestamp: new Date().toISOString(), ...data });
         parentUuid = uuid;
-        return JSON.stringify(entry);
-      });
+        return line;
+      };
+      const entries = history.flatMap((message, index) => [
+        entry({ type: message.role, message: message.role === 'assistant'
+          ? { id: `msg_${randomUUID().replaceAll('-', '')}`, type: 'message', model: input.model, ...message,
+            stop_reason: message.content.some(block => block.type === 'tool_use') ? 'tool_use' : 'end_turn',
+            stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } : message }),
+        ...(index === 0 && context ? [entry({ type: 'attachment', attachment: { type: 'session_context', context } })] : []),
+      ]);
       const historyPath = join(folder, 'history.jsonl');
       writeFileSync(historyPath, entries.join('\n') + '\n', { mode: 0o600 });
-      args.push(`--resume=${historyPath}`, '--fork-session');
+      args.push('--no-session-persistence', `--resume=${historyPath}`, '--fork-session');
+      sessionId = null;
+    } else {
+      // Keep this first call's transcript until sessionContext reads its announcement.
+      args.push('--session-id', sessionId);
     }
-    return { args, cleanup, userMessage: { type: 'user', message: userMessage, parent_tool_use_id: null, client_composed: true } };
+    return { args, env, cleanup, sessionId,
+      userMessage: userMessage && { type: 'user', message: userMessage, parent_tool_use_id: null, client_composed: true } };
   } catch (error) { cleanup(); throw error; }
+}
+
+// Read the account context a first call announced, then remove its transcript.
+export function sessionContext(sessionId) {
+  const projects = join(homedir(), '.claude', 'projects');
+  for (const project of readdirSync(projects)) {
+    const path = join(projects, project, `${sessionId}.jsonl`);
+    if (!existsSync(path)) continue;
+    try {
+      const announced = readFileSync(path, 'utf8').split('\n').filter(line => line.includes('"session_context"'))
+        .map(line => JSON.parse(line).attachment).filter(attachment => attachment?.type === 'session_context');
+      return announced.at(-1)?.context;
+    } finally { rmSync(path, { force: true }); }
+  }
 }
 
 // Rebuild the provider's first message without flattening blocks or inventing tool calls.

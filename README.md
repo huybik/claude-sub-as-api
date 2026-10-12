@@ -83,13 +83,16 @@ for block in message.content:
 | `output_config.effort` | `low`, `medium`, `high`, `xhigh`, or `max`. |
 | `output_config.format` | `{"type":"json_schema","schema":{...}}`. The JSON result is returned as a text block. |
 | `thinking` | `{"type":"adaptive"}`. Omit it for the model default. See the disabled-thinking limit below. |
+| `cache_control` | On a message content block, or top-level for automatic caching. See [Prompt caching](#prompt-caching). |
 
 Image sources use `{"type":"base64","media_type":"image/png","data":"..."}`.
 PNG, JPEG, GIF, and WebP are accepted, up to 5 MiB per image and 32 MiB per request.
 User and assistant content blocks are preserved. History is loaded through a temporary Claude transcript.
-Final tool results are loaded with that history before resume, so Claude does not mark those calls as interrupted.
-The remaining final user content is sent through Claude's structured input protocol; an empty text block starts
-the response when that turn contains only tool results. Temporary files are removed after the call.
+A final user message without tool results is sent through Claude's structured input protocol.
+A final user message with tool results goes into the transcript instead, and Claude Code resumes the turn
+those results answer. Claude Code then adds one short meta note after them ("Continue from where you left off.").
+A new prompt after the results would make Claude Code insert an assistant reply the model never wrote
+("No response requested."). Temporary files are removed after the call.
 
 `system` messages are a local extension. Their text is appended to the top-level system prompt in message
 order and sent through SDK initialization. These notes have system priority. Their original positions among
@@ -109,7 +112,7 @@ For structured output, send `output_config.format` on each call. Schema output i
 result is ready, including when `stream` is true. Claude Code validates the schema but does not enforce `format`
 annotations such as `email`. Schema definitions are limited to 64 KiB.
 
-Unsupported fields return HTTP 400. This includes image URLs, document blocks, cache controls, metadata,
+Unsupported fields return HTTP 400. This includes image URLs, document blocks, metadata,
 custom stop sequences, forced tool choice, strict tool flags, and combining client tools with structured output.
 These models accept only the default `temperature: 1`; omit temperature in normal calls.
 Claude Code still owns context management. This adapter does not implement the full Anthropic platform API.
@@ -122,9 +125,43 @@ This is a Claude Code adapter limit; the direct Haiku API supports disabled thin
 See [Anthropic thinking support](https://platform.claude.com/docs/en/build-with-claude/thinking).
 
 Other limits remain explicit: no token-counting or batch endpoints, no SDK-compatible model-list endpoint
-(`/v1/models` has the custom shape below), and no client-controlled prompt cache, server tools, PDF/document
+(`/v1/models` has the custom shape below), and no server tools, PDF/document
 blocks, URL images, forced tool choice, or strict tool schemas. These need upstream support or separate
 implementation; they are not silently converted to a different behavior.
+
+## Prompt caching
+
+`/v1/messages` caches what the request marks, as the Messages API does.
+
+- Put `cache_control: {"type": "ephemeral"}` on a text, image, tool use, or tool result block in `messages`.
+  The cached prefix runs from the tools and system prompt through that block.
+- Or set top-level `cache_control` for automatic caching. It marks the last block of the final user message,
+  so the next turn of the conversation reads everything before its new content.
+- `ttl` is `5m` (the default) or `1h`, as on the API. A request holds at most four breakpoints,
+  and a longer TTL must come before a shorter one; the API rejects other requests.
+- A request without breakpoints is not cached. Claude Code's own breakpoints are off for this endpoint
+  (`DISABLE_PROMPT_CACHING`). They wrote every prompt with a one-hour TTL, twice the input rate,
+  including prompts nothing read again, and took two or three of the four breakpoints.
+- Breakpoints on `system` blocks and `tools` are accepted but not placed: Claude Code builds the system prompt
+  and the tool list. A message breakpoint still caches them with the rest of its prefix.
+
+Claude Code puts the account context (the user's email address) in front of the first prompt of a session.
+On a follow-up, the rebuilt history carries that context after its first message, where the conversation's
+first call put it, so the follow-up's prompt starts with the same bytes and reads that call's cache.
+The adapter reads the context from the first call's transcript, the only transcript it keeps, and deletes it.
+After a restart or a login change, the first follow-up of an older conversation can miss the cache once.
+
+Live check on 2026-10-12 with Haiku 5.5 at low effort, a 15K-token prefix marked with a five-minute TTL:
+
+| Call | Cache write | Cache read | Read share |
+| --- | --- | --- | --- |
+| First call | 15,170 | 0 | 0% |
+| Second call, same prefix and a different question | 13 | 15,157 | 97.6% |
+| Follow-up turn of the first call | 21 | 15,170 | 97.5% |
+| Tool result turn after a tool call | 38 | 15,608 | 97.4% |
+
+Before this change, a follow-up wrote the whole conversation again and read nothing from cache, and
+parallel calls with a shared prefix each wrote it in full.
 
 ## Parallel requests
 
@@ -172,7 +209,8 @@ A reused response retains its original message ID, token usage, and generation d
 
 - `claude_processes`: generation subprocesses started; excludes the startup login check.
 - `model_calls`: model messages observed in upstream streams. One subprocess can make several calls.
-- `failed_processes`: failed or cancelled generation subprocesses.
+- `failed_processes`: failed or cancelled generation subprocesses. A client that closes the stream after
+  the answer ends does not count.
 - Input/output tokens and upstream cache read/write tokens reported by Claude, counted once per process.
   Interrupted calls include only reported usage; these counters are not an account billing or quota report.
 - `local_reuse`: hits, misses, shared calls, evictions, stored bytes, entries, and waiting clients.
