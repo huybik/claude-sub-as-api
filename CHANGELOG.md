@@ -2,6 +2,13 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions: [SemVer](https://semver.org).
 
+## Unreleased
+
+- Optional cloud mode on `/v1/messages`, selected by `x-local-backend: cloud`. Supports one user turn, images,
+  system text, effort, automatic cloud prompt caching, and buffered SSE. Unsupported controls return HTTP 400.
+- Cloud sessions are archived on completion or cancellation. Usage counters distinguish cloud work from local work.
+- Response cache and request sharing keys include the execution backend.
+
 ## [0.2.0] - 2026-10-12
 
 ### Added

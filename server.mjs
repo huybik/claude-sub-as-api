@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { RequestQueue } from './queue.mjs';
 import { ResponseReuse, reuseOptions } from './reuse.mjs';
+import { CloudMessages, validateCloud, emitCloudMessage } from './cloud.mjs';
 import { AnthropicMessage, anthropicError, prepareAnthropic, sessionContext, toolControl, validateAnthropic } from './anthropic.mjs';
 
 const directory = fileURLToPath(new URL('.', import.meta.url));
@@ -39,6 +40,7 @@ if (!auth.loggedIn || auth.authMethod !== 'claude.ai' || auth.apiProvider !== 'f
 const queue = new RequestQueue(Number(process.env.CLAUDE_LOCAL_API_CONCURRENCY ?? 10));
 const activeCalls = new Set();
 const reuse = new ResponseReuse();
+const cloud = new CloudMessages();
 let announced; // The account context Claude Code announces; learned once per server start.
 const usage = { started_at: new Date().toISOString(), claude_processes: 0, model_calls: 0, failed_processes: 0,
   input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
@@ -281,16 +283,21 @@ const server = createServer(async (request, response) => {
       return reply(response, 200, { models });
     }
     if (request.method === 'GET' && path === '/v1/usage') {
-      return reply(response, 200, { ...usage, local_reuse: reuse.stats() });
+      return reply(response, 200, { ...usage, cloud: cloud.usage, local_reuse: reuse.stats() });
     }
     if (request.method === 'GET' && path === '/v1/health') {
       return reply(response, 200, {
         status: 'ok', busy: queue.active > 0, active: queue.active, queued: queue.waiting.length,
         max_concurrency: queue.limit, uptime_seconds: Math.floor(process.uptime()),
+        cloud: { configured: Boolean(cloud.environment), streaming: 'buffered', max_tokens: 128000, history: false, client_tools: false, prompt_cache_control: false },
         features: ['streaming', 'sessions', 'structured_output', 'effort', 'anthropic_messages', 'images', 'client_tools', 'request_queue', 'usage', 'response_cache', 'request_coalescing'],
       });
     }
     if (request.method !== 'POST' || !['/v1/generate', '/v1/messages'].includes(path)) throw fail(404, 'Unknown endpoint.');
+    const backend = request.headers['x-local-backend'] ?? 'local';
+    if (!['local', 'cloud'].includes(backend)) throw fail(400, 'x-local-backend must be local or cloud.');
+    if (backend === 'cloud' && !anthropic) throw fail(400, 'Cloud mode is available only on /v1/messages.');
+    response.setHeader('x-local-backend', backend);
     if (!/^application\/json(?:;|$)/i.test(request.headers['content-type'] ?? '')) {
       throw fail(415, 'Send Content-Type: application/json.');
     }
@@ -306,11 +313,18 @@ const server = createServer(async (request, response) => {
     try { input = JSON.parse(body); } catch { throw fail(400, 'Invalid JSON.'); }
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw fail(400, 'Send a JSON object.');
     async function execute(input) {
-      const settings = reuseOptions(request.headers, path, body, input);
+      const settings = reuseOptions(request.headers, path, body, input, backend);
       const result = await reuse.run(settings, signal, async workSignal => {
         const release = await queue.acquire(workSignal, input.session_id);
         try {
           workSignal.throwIfAborted();
+          if (backend === 'cloud') {
+            const shutdown = new AbortController();
+            const stop = () => shutdown.abort(fail(503, 'The service is stopping.'));
+            activeCalls.add(stop);
+            try { return await cloud.run(input, AbortSignal.any([workSignal, shutdown.signal])); }
+            finally { activeCalls.delete(stop); }
+          }
           return await (anthropic ? messagesRequest(input, response, workSignal, requestID) : generateRequest(input, response, workSignal));
         } finally { release(); }
       });
@@ -318,8 +332,15 @@ const server = createServer(async (request, response) => {
       return result.data;
     }
     if (anthropic) {
+      if (backend === 'cloud' && input.tools?.length) throw fail(400, 'Cloud mode does not support client tools, even with tool_choice: none.');
       input = validateAnthropic(input, models, efforts);
+      if (backend === 'cloud') validateCloud(input);
       const result = await execute(input);
+      if (backend === 'cloud' && input.stream) {
+        response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+        emitCloudMessage(result, data => event(response, data.type, data));
+        response.end();
+      }
       if (!input.stream) reply(response, 200, result);
       return;
     }

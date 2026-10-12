@@ -23,7 +23,7 @@ Install directory: `~/.local/share/claude-local-api` (call it `INSTALL_DIR`). Th
 
 ```sh
 mkdir -p ~/.local/share/claude-local-api/docs ~/.local/bin
-cp server.mjs anthropic.mjs queue.mjs reuse.mjs README.md CONTEXT.md CHANGELOG.md ~/.local/share/claude-local-api/
+cp server.mjs anthropic.mjs cloud.mjs queue.mjs reuse.mjs README.md CONTEXT.md CHANGELOG.md ~/.local/share/claude-local-api/
 cp docs/reference.md ~/.local/share/claude-local-api/docs/
 ```
 
@@ -43,6 +43,10 @@ Copy `deploy/claude-local-api` to `~/.local/bin/claude-local-api`, then replace 
 Run `chmod 755 ~/.local/bin/claude-local-api`.
 
 ## 4. Start it as a service
+
+For optional cloud mode, add `CLAUDE_LOCAL_API_CLOUD_ENVIRONMENT` with the user's existing Anthropic cloud environment
+ID (`env_...`) to the service environment. Leave it unset for local-only use. Cloud mode is selected per request by
+`x-local-backend: cloud`; it has a narrower contract documented in `docs/reference.md`.
 
 ### macOS (LaunchAgent)
 
