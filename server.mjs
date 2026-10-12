@@ -2,7 +2,6 @@ import { execFile, spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -11,7 +10,7 @@ import { ResponseReuse, reuseOptions } from './reuse.mjs';
 import { AnthropicMessage, anthropicError, prepareAnthropic, toolControl, validateAnthropic } from './anthropic.mjs';
 
 const directory = fileURLToPath(new URL('.', import.meta.url));
-const claude = join(homedir(), '.local/bin/claude');
+const claude = 'claude';
 const models = ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-haiku-5-5'];
 const efforts = ['low', 'medium', 'high', 'xhigh', 'max'];
 const sessionsPath = join(directory, 'sessions.json');
@@ -360,7 +359,7 @@ const server = createServer(async (request, response) => {
 
 server.on('error', error => { console.error(error.message); process.exitCode = 1; });
 server.listen(port, '127.0.0.1', () => {
-  console.log(`Claude local API: http://127.0.0.1:${port}/v1/generate`);
+  console.log(`Claude local API: http://127.0.0.1:${port}`);
   console.log(`Local token file: ${tokenPath}`);
   console.log('Using your Claude subscription login. Press Ctrl+C to stop.');
 });

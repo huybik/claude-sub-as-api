@@ -11,14 +11,13 @@ Install directory: `~/.local/share/claude-local-api` (call it `INSTALL_DIR`). Th
 
 - **Node.js 22 or newer.** Run `node --version`, then record the absolute path from `command -v node`.
   With nvm, use the real version path, such as `~/.nvm/versions/node/v22.x.y/bin/node`, not a shim.
-- **Claude Code, native install, at `~/.local/bin/claude`.** `server.mjs` uses that exact path.
-  If `claude` is installed somewhere else, ask the user before you link it there or edit the `claude` constant in `server.mjs`.
+- **Claude Code on `PATH`.** The server runs `claude` through `PATH`. Record the directory from `command -v claude`.
   Claude Code must support the `claude-*-5-5` models. Run `claude --version`; the server was validated on 2.1.296.
 - **Subscription login.** Run `claude auth status`. It must report `loggedIn: true`, `authMethod: "claude.ai"`, and
   `apiProvider: "firstParty"`. If any value differs, ask the user to run `claude auth login` and select their subscription.
   The server refuses to start without this login. It does not use API keys.
 - **Port 8787 is free.** Run `lsof -nP -iTCP:8787 -sTCP:LISTEN`. If another process holds the port, ask the user before you continue.
-  To use another port, set `CLAUDE_LOCAL_API_PORT` in the service environment.
+  To use another port, add `CLAUDE_LOCAL_API_PORT` to the service environment and use that port in the steps below.
 
 ## 2. Copy the files
 
@@ -46,8 +45,9 @@ Run `chmod 755 ~/.local/bin/claude-local-api`.
 
 ### macOS (LaunchAgent)
 
-Copy `deploy/local.claude-api.plist` to `~/Library/LaunchAgents/local.claude-api.plist`.
+Run `mkdir -p ~/Library/LaunchAgents`, then copy `deploy/local.claude-api.plist` to `~/Library/LaunchAgents/local.claude-api.plist`.
 Replace `__HOME__`, `__INSTALL_DIR__`, and `__NODE_BIN_DIR__` (the directory that contains the Node.js binary).
+If the `claude` directory from step 1 is not already in the plist `PATH`, add it.
 launchd does not expand `~` or `$HOME`, so use absolute paths. Validate the file with `plutil -lint`, then load it:
 
 ```sh
@@ -55,6 +55,7 @@ launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/local.claude-api.plist
 ```
 
 If `local.claude-api` is already loaded, apply updated code with `launchctl kickstart -k "gui/$(id -u)/local.claude-api"`.
+A kickstart does not reread the plist. After a plist change, run `launchctl bootout "gui/$(id -u)/local.claude-api"`, then run the bootstrap command again.
 The agent starts at login and restarts the server if it exits.
 
 ### Linux
@@ -70,14 +71,15 @@ Update the start, restart, and log commands in `README.md` to match. The server 
 
 ### Foreground run
 
-For a one-time check, run `~/.local/bin/claude-local-api`. It prints the port and the token path.
+Use this instead of a service for a one-time check. If the service is loaded, stop it first so that port 8787 is free.
+Run `~/.local/bin/claude-local-api`. It prints the base URL and the token path.
 
 ## 5. Verify the server
 
 ```sh
 TOKEN=$(cat ~/.local/share/claude-local-api/token)
-curl -sf http://127.0.0.1:8787/v1/health -H "Authorization: Bearer $TOKEN"
-curl -sf http://127.0.0.1:8787/v1/generate -H "Authorization: Bearer $TOKEN" \
+curl -sS --fail-with-body http://127.0.0.1:8787/v1/health -H "Authorization: Bearer $TOKEN"
+curl -sS --fail-with-body http://127.0.0.1:8787/v1/generate -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -H 'x-local-cache: false' -H 'x-local-coalesce: false' \
   -d '{"model":"claude-haiku-5-5","prompt":"Reply with OK.","effort":"low"}'
 ```

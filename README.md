@@ -12,17 +12,18 @@ This is an unofficial project and is not affiliated with Anthropic. Calls count 
 
 Requirements:
 - Node.js 22 or newer.
-- Claude Code native install at `~/.local/bin/claude`.
+- Claude Code on `PATH`.
 - A Claude subscription login (`claude auth login`).
 
 The easiest install is through Claude Code. Clone this repository, open Claude Code in it, and say:
 "Follow DEPLOY.md". To install by hand, follow the same steps in [DEPLOY.md](DEPLOY.md).
 The installed server runs from `~/.local/share/claude-local-api` as the `local.claude-api` macOS LaunchAgent.
+On Linux, DEPLOY.md sets it up as a systemd user service instead. The commands below are for macOS.
 
 ## Start and restart
 
 The macOS LaunchAgent starts at login and restarts the service if it stops.
-After a code update, activate it from Terminal:
+After a code update, repeat DEPLOY.md step 2 to copy the files, then restart the service:
 
 ```sh
 launchctl kickstart -k "gui/$(id -u)/local.claude-api"
@@ -128,7 +129,7 @@ implementation; they are not silently converted to a different behavior.
 ## Parallel requests
 
 - Up to **10 calls run at once**, shared by both endpoints. Another 32 calls can wait in the queue.
-- A 3×3 batch can start all nine calls together. A full local queue returns HTTP 503.
+- A full local queue returns HTTP 503.
 - Calls that resume the same saved session run in order. Other sessions can run at the same time.
 - Each model process has a twenty-minute timeout, starting when its queue slot opens.
 - A client disconnect cancels an active call or removes a waiting call.
@@ -182,7 +183,7 @@ To request independent answers with the Anthropic SDK:
 message = client.messages.create(
     model="claude-haiku-5-5",
     max_tokens=128,
-    messages=[{"role": "user", "content": "Classify this item: copper pipe."}],
+    messages=[{"role": "user", "content": "Name a primary color."}],
     extra_headers={"x-local-cache": "false", "x-local-coalesce": "false"},
 )
 ```
@@ -256,14 +257,8 @@ Subscription limits and account extra-usage settings apply.
 - `~/.local/bin/claude-local-api`: launcher; uses the Node.js path set at install.
 - `~/Library/LaunchAgents/local.claude-api.plist`: startup and restart settings.
 
-Offline checks cover both handlers, 10 active slots, 32 queued calls, saved-session ordering, HTTP error responses,
-large system prompts, tool-result validation, and Anthropic Python SDK 1.11.0 JSON/SSE parsing.
-Real local subprocess checks cover cancellation, timeout, forced termination, stream parsing, and slot cleanup.
-Native Claude Code initialization accepts the settings, transcript, and SDK MCP bridge without making model calls.
-Live checks on 2026-10-10 passed for text and JSON reuse, independent calls, both streaming endpoints,
-Anthropic SDK stream parsing, shared-client cancellation, failure retries, truncated-answer exclusion, header validation, and access control.
-Cache expiry, size limits, eviction, truncation exclusion, and failed-call cleanup were checked in memory.
-No test files are stored.
+Validated with Claude Code 2.1.296 and Anthropic Python SDK 1.11.0 (JSON, SSE, tools, structured output, reuse,
+cancellation, and timeouts). `CONTEXT.md` records the checks. No test files are stored.
 
 References: [Claude programmatic interface](https://code.claude.com/docs/en/headless),
 [structured image input](https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode),
