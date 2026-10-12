@@ -37,10 +37,10 @@ It keeps your usage low by caching what you mark, as the API does.
   your app ◀── Anthropic JSON / SSE ── translated response
 ```
 
-- **At most one process per request.** A request runs one Claude Code process, or none when it is served from the local response cache or shares an identical call already running.
+- **Local execution by default.** A local request runs one Claude Code process, or none when it is served from the response cache or shares an identical call already running.
 - **Your tools stay yours.** Tool definitions reach Claude through an in-process MCP bridge, and the call stops
   before Claude Code would run a tool, so your app runs it.
-- **No dependencies.** Four small Node.js files.
+- **No dependencies.** Node.js built-ins only.
 
 ## Features
 
@@ -74,7 +74,30 @@ reply = client.messages.create(model="claude-sonnet-5-5", max_tokens=1024,
 print(next(block.text for block in reply.content if block.type == "text"))
 ```
 
-## Good to know
+## Cloud sessions (experimental)
+
+Set `CLAUDE_LOCAL_API_CLOUD_ENVIRONMENT` to an existing Anthropic cloud environment ID (`env_...`) in the service
+environment, then reload the service. Opt in on each `/v1/messages` call:
+
+```python
+reply = client.messages.create(
+    model="claude-haiku-5-5", max_tokens=128000,
+    messages=[{"role": "user", "content": "What is 17 times 19?"}],
+    extra_headers={"x-local-backend": "cloud"},
+)
+```
+
+Cloud mode supports **one user turn, text, base64 images, system text, effort, and buffered SSE**. It requires
+`max_tokens=128000`: smaller output limits, history, client tools, structured output, and `cache_control` return
+HTTP 400. Cloud prompt caching is automatic; local response caching and request sharing also work, with separate
+entries for local and cloud calls. It never switches execution modes on failure.
+
+Each uncached call creates a cloud session and archives it after completion or cancellation. Its transcript stays
+in your Claude account. Eligible cloud credits apply automatically; normal plan and extra-usage rules apply after
+those credits expire or run out. This uses an **undocumented session API**, not the Anthropic Messages endpoint.
+See the [cloud reference](docs/reference.md#cloud-mode-experimental) for exact limits and authentication.
+
+## Good to know (local mode)
 
 - **Cache what you reuse.** Unmarked requests are not prompt-cached. Put `cache_control: {"type": "ephemeral"}` on the
   last shared block, or set top-level `cache_control` in multi-turn calls.

@@ -7,6 +7,8 @@ configuration, security, and troubleshooting.
 
 ### `POST /v1/messages`
 
+The table below describes local mode, the default. Set `x-local-backend: cloud` for the narrower cloud contract below.
+
 | Field | Support |
 | --- | --- |
 | `model`, `max_tokens`, `messages` | Required. Output limit: 1–128,000 tokens. |
@@ -38,6 +40,47 @@ Details:
 - **Structured output.** Send `output_config.format` on each call. The JSON is emitted when the result is complete,
   even with `stream: true`. Claude Code validates the schema but does not enforce `format` annotations such as `email`.
   Schemas are limited to 64 KiB.
+
+### Cloud mode (experimental)
+
+Set `CLAUDE_LOCAL_API_CLOUD_ENVIRONMENT=env_...` to an existing Anthropic-hosted cloud environment and reload the
+service. Requests select `x-local-backend: local` (default) or `x-local-backend: cloud`. The response repeats that
+header. Other values, and cloud mode on `/v1/generate`, return HTTP 400. Without the environment setting, cloud
+requests return HTTP 503; the service never changes to local execution or an API key.
+
+| Feature | Cloud behavior |
+| --- | --- |
+| Text and base64 images | One user turn after normal role merging. Same image and request size limits as local mode. |
+| System text | Sent as the session's custom system prompt. The cloud worker can add its own instructions. |
+| Model and effort | Requested model and effort are sent in session configuration. Reply model and worker output capacity are checked. |
+| `max_tokens` | Must be `128000`, the worker's output capacity. Per-request environment variables are disabled upstream, so smaller limits return HTTP 400. |
+| JSON response | Actual assistant text and thinking blocks, message ID, stop reason, and reported token usage. |
+| `stream: true` | Buffered Anthropic SSE after completion and archive, including thinking signatures. This is not live token streaming. |
+| Prompt cache | Automatic cloud worker caching. Usage includes real cache read/write counts. Client breakpoints and TTLs return HTTP 400. |
+| Local response cache and request sharing | Enabled for eligible requests. Backend, endpoint, and exact body bytes form the key. |
+| History, tools, structured output | HTTP 400. No history flattening, simulated tool calls, or prompt-based schema enforcement. |
+
+Each cache miss creates a fresh session with no repository or connectors, all tools denied, and one model turn.
+The adapter checks that the worker reports an empty tool list and that the session contains only its own user turn.
+It reads the session event log and archives the session before returning the reply. Queue capacity remains occupied
+through cleanup. Disconnect, shutdown, or the twenty-minute deadline also causes archive. An archive failure returns
+HTTP 502 with the session URL so you can stop it. Creation is not retried: if its response is lost, check
+`claude.ai/code` for an unfinished **Local API request** before sending another request.
+
+Cloud mode reads the existing Claude Code OAuth login from the macOS **Claude Code-credentials** Keychain item,
+or `~/.claude/.credentials.json` on Linux. It does not save or log the token and sends it only to
+`https://api.anthropic.com`. Custom credential directories are not supported. If the login expires, run
+`claude auth login` and restart the service. All cloud input and replies remain in the archived cloud transcript;
+they are not deleted from the account.
+
+The cloud session API is undocumented and may change. Promotional cloud credits apply only while eligible credits
+remain; after that, your plan limits and account extra-usage settings apply. The adapter cannot select a billing pool
+or enforce a credits-only spending limit. See [Anthropic's credit rules](https://support.claude.com/en/articles/17152539-cloud-sessions-bonus-credit-promotion).
+
+`/v1/health.cloud` describes configuration and limits. `/v1/usage.cloud` reports cloud sessions, completed model calls,
+failed requests, observed promotional calls, reported cost, and tokens. Local process counters remain separate.
+These counters reset at restart; cache hits and shared callers do not count as new cloud work. An interrupted
+request can incur upstream usage before a result is available, so these counters are not a billing ledger.
 
 ### `POST /v1/generate`
 
@@ -98,7 +141,7 @@ Errors on `/v1/messages` use the Anthropic error shape: `{"type":"error","error"
 
 ## Prompt caching
 
-`/v1/messages` caches what a request marks, as the Messages API does. Cache reads cost a fraction of normal input,
+In local mode, `/v1/messages` caches what a request marks, as the Messages API does. Cache reads cost a fraction of normal input,
 so marking a shared prefix is the biggest lever on subscription usage.
 
 - **Block breakpoints.** Put `cache_control: {"type": "ephemeral"}` on a text, image, tool use, or tool result block in
@@ -159,7 +202,7 @@ text or JSON requests:
 | `x-local-cache: false` | Generate a new response instead of reading or writing the ten-minute response cache. |
 | `x-local-coalesce: false` | Run a separate call instead of sharing an identical call already in flight. |
 
-- **Key.** Endpoint plus exact request body bytes.
+- **Key.** Execution backend, endpoint, and exact request body bytes. Local and cloud calls never share an entry.
 - **Limits.** 32 MiB, 1,024 entries, least recently used eviction, memory only. Only `end_turn` responses are stored.
 - **Bypassed:** streaming, saved sessions, tools, and any non-text block. Setting either header to `true` on those
   returns HTTP 400.
@@ -177,6 +220,7 @@ client.messages.create(..., extra_headers={"x-local-cache": "false", "x-local-co
 | --- | --- | --- |
 | `CLAUDE_LOCAL_API_PORT` | `8787` | Listening port on `127.0.0.1`. |
 | `CLAUDE_LOCAL_API_CONCURRENCY` | `10` | Calls that run at once. |
+| `CLAUDE_LOCAL_API_CLOUD_ENVIRONMENT` | Unset | Enables opt-in cloud requests in the specified `env_...` environment. |
 
 Set these in the LaunchAgent's `EnvironmentVariables` or the systemd unit, then reload the service.
 
@@ -210,9 +254,11 @@ launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/local.claude-api.plist
 - **Tools.** Only the client tool definitions you send are exposed, and your application runs them. The server never
   runs shell or file tools.
 - **Policy and limits.** Managed policy, subscription limits, and your account's extra-usage settings still apply.
-- **Transcripts.** `/v1/messages` keeps no transcripts. The exception is the calls that run before the account context
+- **Transcripts.** Local `/v1/messages` keeps no transcripts. The exception is the calls that run before the account context
   is known, normally just the first call after a start: the adapter reads their transcript, then deletes it.
   Claude Code keeps saved `/v1/generate` sessions.
+- **Cloud execution.** Cloud requests use an Anthropic-hosted worker with all tools denied and no repository or
+  connectors. Cloud settings and instructions still apply. Archived cloud transcripts remain in your account.
 
 ## Limitations
 
@@ -250,6 +296,7 @@ Unsupported input fails explicitly; it is never silently converted to different 
 | `anthropic.mjs` | Messages validation, history transcripts, and response translation. |
 | `queue.mjs` | Concurrency limit and waiting requests. |
 | `reuse.mjs` | Local response cache and shared in-flight calls. |
+| `cloud.mjs` | Cloud validation, OAuth access, session lifecycle, replies, and buffered SSE. |
 | `deploy/` | Launcher script and LaunchAgent template. |
 | [`DEPLOY.md`](../DEPLOY.md) | Install steps, written for Claude Code to follow. |
 | [`CONTEXT.md`](../CONTEXT.md) | Implementation and validation notes. |
