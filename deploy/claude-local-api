@@ -1,0 +1,2 @@
+#!/bin/sh
+exec __NODE__ __INSTALL_DIR__/server.mjs "$@"

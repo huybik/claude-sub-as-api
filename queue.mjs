@@ -1,0 +1,58 @@
+export class RequestQueue {
+  active = 0;
+  waiting = [];
+  keys = new Set();
+
+  constructor(limit = 10, capacity = 32) {
+    if (!Number.isInteger(limit) || limit < 1 || !Number.isInteger(capacity) || capacity < 0) {
+      throw new Error('Concurrency and queue capacity must be valid integers.');
+    }
+    this.limit = limit;
+    this.capacity = capacity;
+  }
+
+  acquire(signal, key = null) {
+    return new Promise((resolve, reject) => {
+      if (signal.aborted) return reject(signal.reason);
+      const entry = { key, resolve, reject, signal };
+      entry.abort = () => {
+        const index = this.waiting.indexOf(entry);
+        if (index !== -1) this.waiting.splice(index, 1);
+        reject(signal.reason);
+      };
+      if (this.active < this.limit && (!key || !this.keys.has(key))) {
+        this.start(entry);
+      } else {
+        if (this.waiting.length >= this.capacity) {
+          return reject(Object.assign(new Error('The local request queue is full.'), { status: 503 }));
+        }
+        this.waiting.push(entry);
+        signal.addEventListener('abort', entry.abort, { once: true });
+        this.drain();
+      }
+    });
+  }
+
+  start(entry) {
+    entry.signal.removeEventListener('abort', entry.abort);
+    this.active++;
+    if (entry.key) this.keys.add(entry.key);
+    let released = false;
+    entry.resolve(() => {
+      if (released) return;
+      released = true;
+      this.active--;
+      if (entry.key) this.keys.delete(entry.key);
+      this.drain();
+    });
+  }
+
+  drain() {
+    while (this.active < this.limit) {
+      // Calls for the same saved session keep their order; independent sessions can proceed.
+      const index = this.waiting.findIndex(entry => !entry.key || !this.keys.has(entry.key));
+      if (index === -1) return;
+      this.start(this.waiting.splice(index, 1)[0]);
+    }
+  }
+}
