@@ -39,7 +39,7 @@ if (!auth.loggedIn || auth.authMethod !== 'claude.ai' || auth.apiProvider !== 'f
 const queue = new RequestQueue(Number(process.env.CLAUDE_LOCAL_API_CONCURRENCY ?? 10));
 const activeCalls = new Set();
 const reuse = new ResponseReuse();
-let announced; // The account context Claude Code last announced to a first call.
+let announced; // The account context Claude Code announces; learned once per server start.
 const usage = { started_at: new Date().toISOString(), claude_processes: 0, model_calls: 0, failed_processes: 0,
   input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
 const tokenFields = ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'];
@@ -122,8 +122,8 @@ function runClaude(args, prompt, signal, onText, bridge = {}) {
     signal.addEventListener('abort', cancel, { once: true });
     child.on('error', error => stop(fail(502, `Cannot run Claude: ${error.message}`)));
     child.on('close', (code, exitSignal) => {
-      closed = true;
       consume(pending);
+      closed = true;
       clearTimeout(timeout);
       clearTimeout(killTimer);
       signal.removeEventListener('abort', cancel);

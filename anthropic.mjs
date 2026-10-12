@@ -17,11 +17,13 @@ function cacheControl(value) {
   if (value.type !== 'ephemeral' || ![undefined, '5m', '1h'].includes(value.ttl)) fail('cache_control must be {"type": "ephemeral"} with an optional ttl of 5m or 1h.');
   return { ...value };
 }
-function marked(block, original, nested) {
-  if (original.cache_control == null) return block;
-  if (nested) fail('cache_control is supported on message content blocks, system blocks, and tools; not inside tool results.');
-  return { ...block, cache_control: cacheControl(original.cache_control) };
+function marked(block, original) {
+  return original.cache_control == null ? block : { ...block, cache_control: cacheControl(original.cache_control) };
 }
+// Breakpoint TTLs in prompt order; a tool result's own content comes before its end.
+const breakpoints = blocks => blocks.flatMap(block => [
+  ...(block.type === 'tool_result' ? breakpoints(block.content) : []),
+  ...(block.cache_control ? [block.cache_control.ttl ?? '5m'] : [])]);
 
 function content(value, role, nested = false) {
   if (typeof value === 'string') return [{ type: 'text', text: value }];
@@ -33,7 +35,7 @@ function content(value, role, nested = false) {
         fields(block, ['type', 'text', 'citations', 'cache_control'], 'text block');
         if (typeof block.text !== 'string') fail('Text blocks require text.');
         if (block.citations != null && (!Array.isArray(block.citations) || block.citations.length)) fail('Text citations are not supported.');
-        return marked({ type: 'text', text: block.text }, block, nested && role !== 'system');
+        return marked({ type: 'text', text: block.text }, block);
       }
       case 'image': {
         if (role !== 'user') fail('Image blocks must be in user messages.');
@@ -47,7 +49,7 @@ function content(value, role, nested = false) {
           fail('Image data must be valid base64.');
         }
         if (Buffer.byteLength(source.data, 'base64') > 5 * 1024 * 1024) fail('Each image must be at most 5 MiB.');
-        return marked({ type: 'image', source: { ...source } }, block, nested);
+        return marked({ type: 'image', source: { ...source } }, block);
       }
       case 'tool_use': {
         if (role !== 'assistant' || nested) fail('tool_use blocks must be in assistant messages.');
@@ -60,7 +62,7 @@ function content(value, role, nested = false) {
         if (block.toolset_name != null) fail('Toolset member calls are not supported.');
         // SDK response objects include null optional fields; omit these on replay.
         const { caller, toolset_name, cache_control, ...tool } = block;
-        return marked(caller == null ? tool : { ...tool, caller: { ...caller } }, block, nested);
+        return marked(caller == null ? tool : { ...tool, caller: { ...caller } }, block);
       }
       case 'tool_result': {
         if (role !== 'user' || nested) fail('tool_result blocks must be in user messages.');
@@ -68,7 +70,7 @@ function content(value, role, nested = false) {
         if (typeof block.tool_use_id !== 'string' || !block.tool_use_id) fail('tool_result requires tool_use_id.');
         if (block.is_error !== undefined && typeof block.is_error !== 'boolean') fail('is_error must be boolean.');
         const { cache_control, ...result } = block;
-        return marked({ ...result, content: content(block.content ?? '', 'user', true) }, block, nested);
+        return marked({ ...result, content: content(block.content ?? '', 'user', true) }, block);
       }
       case 'thinking':
         if (role !== 'assistant' || nested) fail('Thinking blocks must be in assistant messages.');
@@ -97,6 +99,7 @@ export function validateAnthropic(input, models, efforts) {
   const appendSystem = value => {
     const blocks = content(value, 'system', true);
     if (blocks.some(block => block.type !== 'text')) fail('system must contain text only.');
+    if (blocks.some(block => block.cache_control)) fail('Claude Code builds the system prompt, so it cannot hold a cache breakpoint. Mark a message block instead.');
     systemParts.push(...blocks.map(block => block.text));
   };
   if (input.system !== undefined) appendSystem(input.system);
@@ -115,9 +118,15 @@ export function validateAnthropic(input, models, efforts) {
   if (messages[0]?.role !== 'user' || messages.at(-1)?.role !== 'user') fail('The non-system message list must start and end with a user message. Assistant prefills are not supported.');
   // Automatic caching marks the end of the conversation, so the next turn reads it.
   if (input.cache_control != null) {
+    const mark = cacheControl(input.cache_control);
     const last = messages.at(-1).content;
-    last[last.length - 1] = { ...last.at(-1), cache_control: cacheControl(input.cache_control) };
+    const block = last.at(-1);
+    if (block.cache_control && (block.cache_control.ttl ?? '5m') !== (mark.ttl ?? '5m')) fail('Top-level cache_control and the last block\'s breakpoint have different TTLs.');
+    last[last.length - 1] = { ...block, cache_control: block.cache_control ?? mark };
   }
+  const ttls = messages.flatMap(message => breakpoints(message.content));
+  if (ttls.length > 4) fail('A request holds at most four cache breakpoints.');
+  if (ttls.includes('5m') && ttls.lastIndexOf('1h') > ttls.indexOf('5m')) fail('A 1h cache breakpoint must come before every 5m breakpoint.');
   const pendingTools = new Set();
   const knownTools = new Set();
   for (const message of messages) {
@@ -138,9 +147,8 @@ export function validateAnthropic(input, models, efforts) {
   if (!Array.isArray(tools)) fail('tools must be a list.');
   const names = new Set();
   for (const tool of tools) {
-    // Claude Code builds the tool list; a message breakpoint caches it with the prompt before it.
     fields(tool, ['name', 'description', 'input_schema', 'cache_control'], 'tool');
-    if (tool.cache_control != null) cacheControl(tool.cache_control);
+    if (tool.cache_control != null) fail('Claude Code builds the tool list, so a tool cannot hold a cache breakpoint. Mark a message block instead.');
     if (typeof tool.name !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(tool.name) || names.has(tool.name)) fail('Tool names must be unique and contain 1–64 letters, digits, underscores, or hyphens.');
     if (tool.description !== undefined && typeof tool.description !== 'string') fail('Tool description must be text.');
     if (!object(tool.input_schema) || tool.input_schema.type !== 'object') fail('Tool input_schema must have type object.');
@@ -173,6 +181,7 @@ export function validateAnthropic(input, models, efforts) {
 // Claude Code announces the account context before the first prompt it sees in a session.
 // A rebuilt history carries that announcement after its first message, where the conversation's
 // first call put it, so a follow-up's prompt starts with the same bytes and reads that call's cache.
+// The context is the same for every call of one login.
 export function prepareAnthropic(input, directory, context) {
   const folder = mkdtempSync(join(directory, 'request-'));
   const cleanup = () => rmSync(folder, { recursive: true, force: true });
@@ -194,8 +203,8 @@ export function prepareAnthropic(input, directory, context) {
       userMessage = null;
       env.CLAUDE_CODE_RESUME_INTERRUPTED_TURN = '1';
     }
-    let sessionId = randomUUID();
     if (history.length) {
+      const sessionId = randomUUID();
       let parentUuid = null;
       const entry = data => {
         const uuid = randomUUID();
@@ -213,20 +222,20 @@ export function prepareAnthropic(input, directory, context) {
       ]);
       const historyPath = join(folder, 'history.jsonl');
       writeFileSync(historyPath, entries.join('\n') + '\n', { mode: 0o600 });
-      args.push('--no-session-persistence', `--resume=${historyPath}`, '--fork-session');
-      sessionId = null;
-    } else {
-      // Keep this first call's transcript until sessionContext reads its announcement.
-      args.push('--session-id', sessionId);
+      args.push(`--resume=${historyPath}`, '--fork-session');
     }
+    // Until the context is known, keep the transcript so sessionContext can read the announcement.
+    const sessionId = context ? null : randomUUID();
+    args.push(...(sessionId ? ['--session-id', sessionId] : ['--no-session-persistence']));
     return { args, env, cleanup, sessionId,
       userMessage: userMessage && { type: 'user', message: userMessage, parent_tool_use_id: null, client_composed: true } };
   } catch (error) { cleanup(); throw error; }
 }
 
-// Read the account context a first call announced, then remove its transcript.
+// Read the account context a call announced, then remove its transcript.
 export function sessionContext(sessionId) {
   const projects = join(homedir(), '.claude', 'projects');
+  if (!existsSync(projects)) return;
   for (const project of readdirSync(projects)) {
     const path = join(projects, project, `${sessionId}.jsonl`);
     if (!existsSync(path)) continue;

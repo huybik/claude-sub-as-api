@@ -133,23 +133,26 @@ implementation; they are not silently converted to a different behavior.
 
 `/v1/messages` caches what the request marks, as the Messages API does.
 
-- Put `cache_control: {"type": "ephemeral"}` on a text, image, tool use, or tool result block in `messages`.
-  The cached prefix runs from the tools and system prompt through that block.
+- Put `cache_control: {"type": "ephemeral"}` on a text, image, tool use, or tool result block in `messages`,
+  including blocks inside a tool result. The cached prefix runs from the tools and system prompt through that block.
 - Or set top-level `cache_control` for automatic caching. It marks the last block of the final user message,
   so the next turn of the conversation reads everything before its new content.
 - `ttl` is `5m` (the default) or `1h`, as on the API. A request holds at most four breakpoints,
-  and a longer TTL must come before a shorter one; the API rejects other requests.
+  and a `1h` breakpoint must come before every `5m` one. Other requests return HTTP 400. If the last block
+  already has a breakpoint, top-level `cache_control` must use the same TTL.
 - A request without breakpoints is not cached. Claude Code's own breakpoints are off for this endpoint
   (`DISABLE_PROMPT_CACHING`). They wrote every prompt with a one-hour TTL, twice the input rate,
   including prompts nothing read again, and took two or three of the four breakpoints.
-- Breakpoints on `system` blocks and `tools` are accepted but not placed: Claude Code builds the system prompt
-  and the tool list. A message breakpoint still caches them with the rest of its prefix.
+- Breakpoints on `system` blocks and `tools` return HTTP 400: Claude Code builds the system prompt and the
+  tool list, so they cannot hold one. A message breakpoint still caches them with the rest of its prefix.
 
 Claude Code puts the account context (the user's email address) in front of the first prompt of a session.
 On a follow-up, the rebuilt history carries that context after its first message, where the conversation's
 first call put it, so the follow-up's prompt starts with the same bytes and reads that call's cache.
-The adapter reads the context from the first call's transcript, the only transcript it keeps, and deletes it.
-After a restart or a login change, the first follow-up of an older conversation can miss the cache once.
+The adapter learns the context from the transcript of the first call after the service starts, then deletes
+that transcript; later calls keep no transcript. That first call, and a follow-up of a conversation begun
+before the start, can miss the cache once. Restart the service after changing the Claude login; until then,
+follow-ups carry the old account's context and miss the cache.
 
 Live check on 2026-10-12 with Haiku 5.5 at low effort, a 15K-token prefix marked with a five-minute TTL:
 
