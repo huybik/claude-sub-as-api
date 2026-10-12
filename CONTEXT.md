@@ -1,6 +1,6 @@
 # Claude local API
 
-- Source: github.com/huybik/claude-subscription-api; DEPLOY.md copies it to `~/.local/share/claude-local-api`. Node.js 22 built-ins (validated on 22.19.0), Claude Code 2.1.296 on `PATH`, existing subscription login.
+- Source: github.com/huybik/claude-sub-as-api; DEPLOY.md copies it to `~/.local/share/claude-local-api`. Node.js 22 built-ins (validated on 22.19.0), Claude Code 2.1.296 on `PATH`, existing subscription login.
 - `server.mjs` owns HTTP and subprocesses; `anthropic.mjs` owns protocol translation; `queue.mjs` owns concurrency; `reuse.mjs` owns response reuse.
 - Launcher: `~/.local/bin/claude-local-api`. LaunchAgent: `~/Library/LaunchAgents/local.claude-api.plist`; starts at login, restarts on exit.
 - Bind `127.0.0.1:8787`; every endpoint requires `token` (0600) as Bearer or `x-api-key`.

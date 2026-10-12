@@ -1,4 +1,4 @@
-# Claude subscription API
+# Claude sub as API
 
 A local Anthropic-compatible API (`POST /v1/messages`) for your Claude Pro or Max subscription.
 Point the Anthropic SDK at `http://127.0.0.1:8787` and each call runs through your Claude Code login,
