@@ -2,7 +2,7 @@
 
 You are deploying a small local HTTP server. It exposes an Anthropic-compatible `/v1/messages` endpoint at
 `http://127.0.0.1:8787` and answers each call by running the user's Claude Code CLI with their Claude subscription.
-`README.md` is the user guide. `CONTEXT.md` holds the implementation notes. Read both before you change anything.
+`README.md` and `docs/reference.md` are the user guide. `CONTEXT.md` holds the implementation notes. Read them before you change anything.
 
 Install directory: `~/.local/share/claude-local-api` (call it `INSTALL_DIR`). The server uses the directory that holds
 `server.mjs` as its working directory and stores its files there.
@@ -22,8 +22,9 @@ Install directory: `~/.local/share/claude-local-api` (call it `INSTALL_DIR`). Th
 ## 2. Copy the files
 
 ```sh
-mkdir -p ~/.local/share/claude-local-api ~/.local/bin
-cp server.mjs anthropic.mjs queue.mjs reuse.mjs README.md CONTEXT.md ~/.local/share/claude-local-api/
+mkdir -p ~/.local/share/claude-local-api/docs ~/.local/bin
+cp server.mjs anthropic.mjs queue.mjs reuse.mjs README.md CONTEXT.md CHANGELOG.md ~/.local/share/claude-local-api/
+cp docs/reference.md ~/.local/share/claude-local-api/docs/
 ```
 
 Do not copy `DEPLOY.md` or `deploy/`. Do not create a `CLAUDE.md` in `INSTALL_DIR`.
@@ -67,7 +68,7 @@ Write an equivalent systemd user unit, such as `~/.config/systemd/user/claude-lo
 - Output goes to the journal.
 
 Enable it with `systemctl --user enable --now claude-local-api`.
-Update the start, restart, and log commands in `README.md` to match. The server code itself is not macOS-specific.
+Update the start, restart, and log commands in `INSTALL_DIR/docs/reference.md` to match. The server code itself is not macOS-specific.
 
 ### Foreground run
 
@@ -96,5 +97,5 @@ Report:
 - The token path.
 - How to restart or stop the service.
 
-Tell the user to point the Anthropic SDK at `base_url="http://127.0.0.1:8787"`, with `api_key` read from the token file
-and `max_retries=0`. Also tell them that `README.md` lists the request fields that return HTTP 400.
+Tell the user to point the Anthropic SDK at `base_url="http://127.0.0.1:8787"`, with `api_key` read from the token file,
+`max_retries=0`, and `timeout=1800`. Also tell them that `README.md` lists the request fields that return HTTP 400, and `docs/reference.md` has the details.
