@@ -2,6 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { totalmem } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -37,7 +38,8 @@ if (!auth.loggedIn || auth.authMethod !== 'claude.ai' || auth.apiProvider !== 'f
   throw new Error('Run claude auth login and select your Claude subscription first.');
 }
 
-const queue = new RequestQueue(Number(process.env.CLAUDE_LOCAL_API_CONCURRENCY ?? 10));
+// One call per GiB of memory: a Claude Code process holds about 250 MB, so a full machine stays out of swap.
+const queue = new RequestQueue(Number(process.env.CLAUDE_LOCAL_API_CONCURRENCY ?? Math.max(1, Math.floor(totalmem() / 2 ** 30))));
 const activeCalls = new Set();
 const reuse = new ResponseReuse();
 const cloud = new CloudMessages();

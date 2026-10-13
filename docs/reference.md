@@ -62,7 +62,7 @@ requests return HTTP 503; the service never changes to local execution or an API
 
 Each cache miss creates a fresh session with no repository or connectors, all tools denied, and one model turn.
 The adapter checks that the worker reports an empty tool list and that the session contains only its own user turn.
-It reads the session event log and archives the session before returning the reply. Queue capacity remains occupied
+It reads the session event log and archives the session before returning the reply. Its slot stays occupied
 through cleanup. Disconnect, shutdown, or the twenty-minute deadline also causes archive. An archive failure returns
 HTTP 502 with the session URL so you can stop it. Creation is not retried: if its response is lost, check
 `claude.ai/code` for an unfinished **Local API request** before sending another request.
@@ -136,7 +136,7 @@ Errors on `/v1/messages` use the Anthropic error shape: `{"type":"error","error"
 | 415 | Content type is not `application/json`. |
 | 429 | Your subscription's rate or usage limit was reached upstream. |
 | 502 | Claude Code failed or returned something unexpected. Upstream request errors also arrive as 502. |
-| 503 | The local queue is full, or the service is stopping. |
+| 503 | The shared-call queue is full, or the service is stopping. |
 | 504 | The call ran past the twenty-minute limit. |
 
 ## Prompt caching
@@ -187,8 +187,9 @@ they read **81.4%** of all input from the cache. In 0.1.0, each of these calls w
 
 ## Concurrency and local reuse
 
-- **Concurrency.** Up to **10 calls run at once**, shared by both POST endpoints, and 32 more can wait. A full queue
-  returns HTTP 503.
+- **Concurrency.** **One call runs at once per GiB of RAM** (48 on a 48 GB machine), shared by both POST endpoints.
+  A Claude Code process holds about 250 MB, so a full load stays out of swap. Further calls wait for a free slot,
+  and time spent waiting counts toward the client's timeout.
 - **Saved sessions.** Calls that resume the same saved session run in order.
 - **Timeouts.** Each process has a twenty-minute limit. A client disconnect cancels its call. A process that ignores
   termination is killed after one second. Set the SDK `timeout` to 1800 s: its 600 s default is shorter, and without
@@ -219,7 +220,7 @@ client.messages.create(..., extra_headers={"x-local-cache": "false", "x-local-co
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `CLAUDE_LOCAL_API_PORT` | `8787` | Listening port on `127.0.0.1`. |
-| `CLAUDE_LOCAL_API_CONCURRENCY` | `10` | Calls that run at once. |
+| `CLAUDE_LOCAL_API_CONCURRENCY` | GiB of RAM | Calls that run at once. |
 | `CLAUDE_LOCAL_API_CLOUD_ENVIRONMENT` | Unset | Enables opt-in cloud requests in the specified `env_...` environment. |
 
 Set these in the LaunchAgent's `EnvironmentVariables` or the systemd unit, then reload the service.
@@ -284,7 +285,6 @@ Unsupported input fails explicitly; it is never silently converted to different 
 | Service won't start; log says "Run claude auth login…" | Run `claude auth login`, choose your subscription, then restart the service. |
 | `401 Invalid local API token` | Read the key from `~/.local/share/claude-local-api/token`; don't use an Anthropic API key. |
 | `429` errors | Your subscription's usage limit was reached. Wait for the reset; the server never falls back to a paid API. |
-| `503` queue full | More than 42 calls are waiting or running. Lower client concurrency, or raise `CLAUDE_LOCAL_API_CONCURRENCY`. |
 | Cache reads stay at 0 | Mark a block with `cache_control`, or set top-level `cache_control`. After a login change, restart the service. |
 | Port 8787 in use | Stop the other process, or set `CLAUDE_LOCAL_API_PORT`. |
 
@@ -294,7 +294,7 @@ Unsupported input fails explicitly; it is never silently converted to different 
 | --- | --- |
 | `server.mjs` | HTTP endpoints and Claude Code subprocess control. |
 | `anthropic.mjs` | Messages validation, history transcripts, and response translation. |
-| `queue.mjs` | Concurrency limit and waiting requests. |
+| `queue.mjs` | Concurrency limit, waiting requests, and saved-session order. |
 | `reuse.mjs` | Local response cache and shared in-flight calls. |
 | `cloud.mjs` | Cloud validation, OAuth access, session lifecycle, replies, and buffered SSE. |
 | `deploy/` | Launcher script and LaunchAgent template. |
