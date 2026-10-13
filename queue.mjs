@@ -4,7 +4,7 @@ export class RequestQueue {
   keys = new Set();
 
   constructor(limit) {
-    if (!Number.isInteger(limit) || limit < 1) throw new Error('Concurrency must be a positive integer.');
+    if (!Number.isInteger(limit) || limit < 1) throw new Error(`Concurrency must be a positive integer, got ${limit}.`);
     this.limit = limit;
   }
 
@@ -17,13 +17,9 @@ export class RequestQueue {
         if (index !== -1) this.waiting.splice(index, 1);
         reject(signal.reason);
       };
-      if (this.active < this.limit && (!key || !this.keys.has(key))) {
-        this.start(entry);
-      } else {
-        this.waiting.push(entry);
-        signal.addEventListener('abort', entry.abort, { once: true });
-        this.drain();
-      }
+      this.waiting.push(entry);
+      signal.addEventListener('abort', entry.abort, { once: true });
+      this.drain();
     });
   }
 

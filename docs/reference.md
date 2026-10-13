@@ -136,7 +136,7 @@ Errors on `/v1/messages` use the Anthropic error shape: `{"type":"error","error"
 | 415 | Content type is not `application/json`. |
 | 429 | Your subscription's rate or usage limit was reached upstream. |
 | 502 | Claude Code failed or returned something unexpected. Upstream request errors also arrive as 502. |
-| 503 | The shared-call queue is full, or the service is stopping. |
+| 503 | The service is stopping, or cloud mode is not configured. |
 | 504 | The call ran past the twenty-minute limit. |
 
 ## Prompt caching
@@ -187,9 +187,10 @@ they read **81.4%** of all input from the cache. In 0.1.0, each of these calls w
 
 ## Concurrency and local reuse
 
-- **Concurrency.** **One call runs at once per GiB of RAM** (48 on a 48 GB machine), shared by both POST endpoints.
+- **Concurrency.** **One call runs at once per GiB of RAM** (48 on a 48 GB Mac), shared by both POST endpoints.
   A Claude Code process holds about 250 MB, so a full load stays out of swap. Further calls wait for a free slot,
-  and time spent waiting counts toward the client's timeout.
+  and time spent waiting counts toward the client's timeout. A waiting call keeps its request body in the server's
+  memory, so don't hold hundreds of large image requests in flight at once.
 - **Saved sessions.** Calls that resume the same saved session run in order.
 - **Timeouts.** Each process has a twenty-minute limit. A client disconnect cancels its call. A process that ignores
   termination is killed after one second. Set the SDK `timeout` to 1800 s: its 600 s default is shorter, and without

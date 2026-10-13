@@ -25,8 +25,8 @@ export class ResponseReuse {
   waiters = 0;
   counters = { cache_hits: 0, cache_misses: 0, shared_calls: 0, evictions: 0 };
 
-  constructor({ ttl = 600_000, maxBytes = 32 * 1024 * 1024, maxEntries = 1024, maxWaiters = 32 } = {}) {
-    Object.assign(this, { ttl, maxBytes, maxEntries, maxWaiters });
+  constructor({ ttl = 600_000, maxBytes = 32 * 1024 * 1024, maxEntries = 1024 } = {}) {
+    Object.assign(this, { ttl, maxBytes, maxEntries });
   }
 
   remove(key) {
@@ -66,7 +66,6 @@ export class ResponseReuse {
     else {
       let group = this.pending.get(key);
       if (group) {
-        if (this.waiters >= this.maxWaiters) throw Object.assign(new Error('The local shared-call queue is full.'), { status: 503 });
         this.counters.shared_calls++;
         source = 'shared';
       } else {

@@ -8,8 +8,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions: [Sem
   system text, effort, automatic cloud prompt caching, and buffered SSE. Unsupported controls return HTTP 400.
 - Cloud sessions are archived on completion or cancellation. Usage counters distinguish cloud work from local work.
 - Response cache and request sharing keys include the execution backend.
-- Concurrency defaults to one call per GiB of RAM instead of 10, and the waiting list has no cap: calls wait for a
-  slot instead of failing with HTTP 503 past 42.
+- Concurrency defaults to one call per GiB of RAM instead of 10. Neither the waiting list nor shared calls have a cap:
+  calls wait for a slot instead of failing with HTTP 503 past 42 waiting calls or 32 sharers.
 
 ## [0.2.0] - 2026-10-12
 
