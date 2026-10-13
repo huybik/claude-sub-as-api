@@ -89,7 +89,8 @@ curl -sS --fail-with-body http://127.0.0.1:8787/v1/generate -H "Authorization: B
   -d '{"model":"claude-haiku-5-5","prompt":"Reply with OK.","effort":"low"}'
 ```
 
-The health call must show `max_concurrency: 10`. The generate call must return JSON with `text`.
+The health call must show `max_concurrency` equal to `node -p "Math.floor(require('os').totalmem() / 2 ** 30)"`,
+or to `CLAUDE_LOCAL_API_CONCURRENCY` if it is set. The generate call must return JSON with `text`.
 The generate call uses a small amount of the user's subscription usage. Do not run load or sweep tests unless the user asks.
 On a failure, read `INSTALL_DIR/server.log` on macOS or `journalctl --user -u claude-local-api` on Linux.
 Report the exact error. Do not work around it.

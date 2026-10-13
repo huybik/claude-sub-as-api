@@ -3,12 +3,9 @@ export class RequestQueue {
   waiting = [];
   keys = new Set();
 
-  constructor(limit = 10, capacity = 32) {
-    if (!Number.isInteger(limit) || limit < 1 || !Number.isInteger(capacity) || capacity < 0) {
-      throw new Error('Concurrency and queue capacity must be valid integers.');
-    }
+  constructor(limit) {
+    if (!Number.isInteger(limit) || limit < 1) throw new Error(`Concurrency must be a positive integer, got ${limit}.`);
     this.limit = limit;
-    this.capacity = capacity;
   }
 
   acquire(signal, key = null) {
@@ -20,16 +17,9 @@ export class RequestQueue {
         if (index !== -1) this.waiting.splice(index, 1);
         reject(signal.reason);
       };
-      if (this.active < this.limit && (!key || !this.keys.has(key))) {
-        this.start(entry);
-      } else {
-        if (this.waiting.length >= this.capacity) {
-          return reject(Object.assign(new Error('The local request queue is full.'), { status: 503 }));
-        }
-        this.waiting.push(entry);
-        signal.addEventListener('abort', entry.abort, { once: true });
-        this.drain();
-      }
+      this.waiting.push(entry);
+      signal.addEventListener('abort', entry.abort, { once: true });
+      this.drain();
     });
   }
 

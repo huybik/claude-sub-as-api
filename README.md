@@ -26,7 +26,7 @@ It keeps your usage low by caching what you mark, as the API does.
                                         │
                      ┌──────────────────▼───────────────────┐
                      │ claude-sub-as-api                    │
-                     │ validate → queue (10 at once)        │
+                     │ validate → queue (1 per GiB of RAM)  │
                      │ → history transcript + cache marks   │
                      └──────────────────┬───────────────────┘
                                         │ claude -p   (safe mode, no built-in tools)
@@ -47,7 +47,8 @@ It keeps your usage low by caching what you mark, as the API does.
 - **Messages API features:** streaming, tool use, images, structured output, effort levels, and adaptive thinking.
 - **Models:** Sonnet 5.5, Opus 5.5, and Haiku 5.5.
 - **Prompt caching** with `cache_control`. Shared prefixes, follow-ups, and tool turns read about 97% from the cache.
-- **Concurrency:** 10 calls at once with a queue, plus a local response cache and a usage counter.
+- **Concurrency:** one concurrent call per GiB of RAM (48 on a 48 GB Mac), the rest wait; plus a local response cache
+  and a usage counter.
 - **Service:** runs as a macOS LaunchAgent or a Linux systemd unit, bound to `127.0.0.1` behind a local key.
 
 ## Quick start
