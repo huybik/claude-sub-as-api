@@ -199,24 +199,38 @@ function profileEnv(name) {
   const configDir = profiles.get(name);
   return configDir ? { CLAUDE_CONFIG_DIR: configDir } : {};
 }
-function selectedProfile(header) {
-  if (Array.isArray(header)) throw fail(400, 'Send one x-local-profile header.');
-  const name = header ?? 'default';
-  if (!profiles.has(name)) throw fail(400, `x-local-profile must be one of: ${[...profiles.keys()].join(', ')}.`);
-  return name;
+function selectedProfile(distinct) {
+  const values = distinct['x-local-profile'];
+  if (values === undefined) return 'default';
+  if (values.length !== 1) throw fail(400, 'Send one x-local-profile header.');
+  if (!profiles.has(values[0])) throw fail(400, `x-local-profile must be one of: ${[...profiles.keys()].join(', ')}.`);
+  return values[0];
 }
 const profileLogins = new Map();
-async function assertProfileLogin(name) {
+async function assertProfileLogin(name, signal) {
   if (name === 'default') return;
-  if (!profileLogins.has(name)) {
-    profileLogins.set(name, (async () => {
+  signal.throwIfAborted();
+  let entry = profileLogins.get(name);
+  if (entry === true) return;
+  if (entry === undefined) {
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    activeCalls.add(stop);
+    entry = { stop, promise: null };
+    profileLogins.set(name, entry);
+    entry.promise = (async () => {
       let stdout;
       try {
         ({ stdout } = await promisify(execFile)(claude, ['--setting-sources', '', 'auth', 'status'], {
-          cwd: directory, env: { ...env, ...profileEnv(name) }, encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024,
+          cwd: directory, env: { ...env, ...profileEnv(name) }, encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024, signal: controller.signal,
         }));
-      } catch {
-        throw fail(502, `Profile ${name} could not be checked. Log it in with its config directory, then retry.`);
+      } catch (error) {
+        // A missing login exits non-zero and still prints JSON. Shutdown aborts the process.
+        if (controller.signal.aborted) throw fail(503, 'The service is stopping.');
+        if (typeof error.stdout === 'string' && error.stdout.trim()) stdout = error.stdout;
+        else throw fail(502, `Profile ${name} could not be checked. Log it in with its config directory, then retry.`);
+      } finally {
+        activeCalls.delete(stop);
       }
       let authStatus;
       try { authStatus = JSON.parse(stdout); }
@@ -224,17 +238,31 @@ async function assertProfileLogin(name) {
       if (!authStatus.loggedIn || authStatus.authMethod !== 'claude.ai' || authStatus.apiProvider !== 'firstParty') {
         throw fail(502, `Profile ${name} is not logged in with a Claude subscription.`);
       }
-    })());
+    })();
   }
-  const pending = profileLogins.get(name);
-  if (pending === true) return;
+  entry.waiters = (entry.waiters ?? 0) + 1;
+  let left = false;
+  const onAbort = () => {
+    if (left) return;
+    left = true;
+    entry.waiters--;
+    if (entry.waiters === 0) entry.stop();
+  };
+  signal.addEventListener('abort', onAbort, { once: true });
   try {
-    await pending;
-    profileLogins.set(name, true);
+    await entry.promise;
   } catch (error) {
-    if (profileLogins.get(name) === pending) profileLogins.delete(name);
+    if (profileLogins.get(name) === entry) profileLogins.delete(name);
     throw error;
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+    if (!left) {
+      left = true;
+      entry.waiters--;
+    }
   }
+  if (signal.aborted) throw signal.reason ?? fail(503, 'The service is stopping.');
+  profileLogins.set(name, true);
 }
 
 function baseArgs(model, tools = []) {
@@ -353,7 +381,7 @@ const server = createServer(async (request, response) => {
   request.on('aborted', cancel);
   try {
     if (request.headers.authorization !== `Bearer ${token}` && request.headers['x-api-key'] !== token) throw fail(401, 'Invalid local API token.');
-    const profile = selectedProfile(request.headers['x-local-profile']);
+    const profile = selectedProfile(request.headersDistinct);
     response.setHeader('x-local-profile', profile);
     if (request.method === 'GET' && path === '/v1/models') {
       return reply(response, 200, { models });
@@ -391,7 +419,7 @@ const server = createServer(async (request, response) => {
     try { input = JSON.parse(body); } catch { throw fail(400, 'Invalid JSON.'); }
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw fail(400, 'Send a JSON object.');
     async function execute(input) {
-      await assertProfileLogin(profile);
+      await assertProfileLogin(profile, signal);
       const settings = reuseOptions(request.headers, path, body, input, backend, profile);
       const result = await reuse.run(settings, signal, async workSignal => {
         const release = await queue.acquire(workSignal, input.session_id);
