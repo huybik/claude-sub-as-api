@@ -1,4 +1,5 @@
 token
 sessions.json
+profiles.json
 *.log
 .DS_Store

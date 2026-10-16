@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 // Exact JSON bytes preserve prompt and schema order. No semantic normalization.
-export function reuseOptions(headers, path, body, input, backend = 'local') {
+export function reuseOptions(headers, path, body, input, backend = 'local', profile = 'default') {
   const nonText = input.messages?.some(message => message.content.some(block => block.type !== 'text'));
   const eligible = !(input.stream || input.save_session || input.session_id || input.tools?.length || nonText);
   const enabled = name => {
@@ -15,7 +15,7 @@ export function reuseOptions(headers, path, body, input, backend = 'local') {
   if (!eligible && (cache || coalesce)) {
     throw Object.assign(new Error('Local reuse requires non-streaming, stateless text or JSON requests without tools.'), { status: 400 });
   }
-  return { cache, coalesce, key: cache || coalesce ? createHash('sha256').update(backend).update('\0').update(path).update('\0').update(body).digest('hex') : null };
+  return { cache, coalesce, key: cache || coalesce ? createHash('sha256').update(backend).update('\0').update(profile).update('\0').update(path).update('\0').update(body).digest('hex') : null };
 }
 
 export class ResponseReuse {

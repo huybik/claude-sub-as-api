@@ -233,8 +233,8 @@ export function prepareAnthropic(input, directory, context) {
 }
 
 // Read the account context a call announced, then remove its transcript.
-export function sessionContext(sessionId) {
-  const projects = join(homedir(), '.claude', 'projects');
+export function sessionContext(sessionId, configDir) {
+  const projects = join(configDir ?? join(homedir(), '.claude'), 'projects');
   if (!existsSync(projects)) return;
   for (const project of readdirSync(projects)) {
     const path = join(projects, project, `${sessionId}.jsonl`);
