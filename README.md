@@ -121,7 +121,9 @@ reply = client.messages.create(
   - `thinking` other than `{"type": "adaptive"}`,
   - forced `tool_choice`, `disable_parallel_tool_use`, tool fields beyond `name`, `description`, and `input_schema`,
     and tools combined with structured output,
-  - cache breakpoints on `system` or `tools`, more than four breakpoints, or `1h` after `5m`.
+  - cache breakpoints on `system` or `tools`, more than four breakpoints, or `1h` after `5m`,
+  - a cache breakpoint on an image of the final user message with no text block before it: Claude Code drops an
+    image's breakpoint, so it moves to the nearest earlier text block.
 - **Limits.** Subscription limits return HTTP 429. The server never falls back to a paid API.
 - **Login change.** Restart the service after you switch Claude logins.
 

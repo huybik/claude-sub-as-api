@@ -6,6 +6,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions: [Sem
 
 - `x-local-profile` selects a Claude subscription from `profiles.json`. `default` leaves `CLAUDE_CONFIG_DIR` unset. Cloud mode accepts only `default`.
 - Response cache and request sharing keys include the profile. Saved `/v1/generate` sessions resume on the profile that started them.
+- Fixed: a cache breakpoint on an image in the final user message cached nothing, since Claude Code rebuilds those
+  images without it. The breakpoint now moves to the nearest text, tool use or tool result block before the image, in
+  that message or an earlier one, so the prefix up to it caches; a request with none before the image returns HTTP 400.
 - Optional cloud mode on `/v1/messages`, selected by `x-local-backend: cloud`. Supports one user turn, images,
   system text, effort, automatic cloud prompt caching, and buffered SSE. Unsupported controls return HTTP 400.
 - Cloud sessions are archived on completion or cancellation. Usage counters distinguish cloud work from local work.
