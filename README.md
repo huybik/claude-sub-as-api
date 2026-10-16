@@ -98,6 +98,18 @@ in your Claude account. Eligible cloud credits apply automatically; normal plan 
 those credits expire or run out. This uses an **undocumented session API**, not the Anthropic Messages endpoint.
 See the [cloud reference](docs/reference.md#cloud-mode-experimental) for exact limits and authentication.
 
+## Profiles
+
+`x-local-profile` chooses which Claude subscription a call uses. Names come from [`profiles.json`](profiles.json). `default` is the normal `~/.claude` login. Other names set `CLAUDE_CONFIG_DIR` for that call. Cloud mode accepts only `default`.
+
+```python
+reply = client.messages.create(
+    model="claude-haiku-5-5", max_tokens=256,
+    messages=[{"role": "user", "content": "Hello, Claude"}],
+    extra_headers={"x-local-profile": "claude-p"},
+)
+```
+
 ## Good to know (local mode)
 
 - **Cache what you reuse.** Unmarked requests are not prompt-cached. Put `cache_control: {"type": "ephemeral"}` on the

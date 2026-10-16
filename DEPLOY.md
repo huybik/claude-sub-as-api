@@ -30,8 +30,9 @@ cp docs/reference.md ~/.local/share/claude-local-api/docs/
 Do not copy `DEPLOY.md` or `deploy/`. Do not create a `CLAUDE.md` in `INSTALL_DIR`.
 Every Claude subprocess runs there, so a `CLAUDE.md` would add its text to every request.
 
-The package does not include a `token` file. On the first start, the server creates a random local key in
-`INSTALL_DIR/token` with mode 0600. If you redeploy over an existing install, keep its `token` and `sessions.json`.
+The package does not include a `token` or `profiles.json`. On the first start, the server creates a random local key in
+`INSTALL_DIR/token` with mode 0600, and `profiles.json` containing `{"default": null}`. If you redeploy over an existing
+install, keep its `token`, `profiles.json`, and `sessions.json`.
 
 ## 3. Install the launcher
 

@@ -57,7 +57,7 @@ requests return HTTP 503; the service never changes to local execution or an API
 | JSON response | Actual assistant text and thinking blocks, message ID, stop reason, and reported token usage. |
 | `stream: true` | Buffered Anthropic SSE after completion and archive, including thinking signatures. This is not live token streaming. |
 | Prompt cache | Automatic cloud worker caching. Usage includes real cache read/write counts. Client breakpoints and TTLs return HTTP 400. |
-| Local response cache and request sharing | Enabled for eligible requests. Backend, endpoint, and exact body bytes form the key. |
+| Local response cache and request sharing | Enabled for eligible requests. Backend, profile, endpoint, and exact body bytes form the key. |
 | History, tools, structured output | HTTP 400. No history flattening, simulated tool calls, or prompt-based schema enforcement. |
 
 Each cache miss creates a fresh session with no repository or connectors, all tools denied, and one model turn.
@@ -67,9 +67,9 @@ through cleanup. Disconnect, shutdown, or the twenty-minute deadline also causes
 HTTP 502 with the session URL so you can stop it. Creation is not retried: if its response is lost, check
 `claude.ai/code` for an unfinished **Local API request** before sending another request.
 
-Cloud mode reads the existing Claude Code OAuth login from the macOS **Claude Code-credentials** Keychain item,
+Cloud mode reads the default Claude Code OAuth login from the macOS **Claude Code-credentials** Keychain item,
 or `~/.claude/.credentials.json` on Linux. It does not save or log the token and sends it only to
-`https://api.anthropic.com`. Custom credential directories are not supported. If the login expires, run
+`https://api.anthropic.com`. A non-default `x-local-profile` returns HTTP 400. If the login expires, run
 `claude auth login` and restart the service. All cloud input and replies remain in the archived cloud transcript;
 they are not deleted from the account.
 
@@ -204,7 +204,7 @@ text or JSON requests:
 | `x-local-cache: false` | Generate a new response instead of reading or writing the ten-minute response cache. |
 | `x-local-coalesce: false` | Run a separate call instead of sharing an identical call already in flight. |
 
-- **Key.** Execution backend, endpoint, and exact request body bytes. Local and cloud calls never share an entry.
+- **Key.** Execution backend, profile, endpoint, and exact request body bytes. Local and cloud calls never share an entry, and neither do two profiles.
 - **Limits.** 32 MiB, 1,024 entries, least recently used eviction, memory only. Only `end_turn` responses are stored.
 - **Bypassed:** streaming, saved sessions, tools, and any non-text block. Setting either header to `true` on those
   returns HTTP 400.
@@ -224,7 +224,19 @@ client.messages.create(..., extra_headers={"x-local-cache": "false", "x-local-co
 | `CLAUDE_LOCAL_API_CONCURRENCY` | GiB of RAM | Calls that run at once. |
 | `CLAUDE_LOCAL_API_CLOUD_ENVIRONMENT` | Unset | Enables opt-in cloud requests in the specified `env_...` environment. |
 
-Set these in the LaunchAgent's `EnvironmentVariables` or the systemd unit, then reload the service.
+### Profiles
+
+`profiles.json`, next to `server.mjs`, maps a name to a Claude Code config directory. The server creates it on first start with `{"default": null}` and mode 0600. `default` leaves `CLAUDE_CONFIG_DIR` unset so Claude uses `~/.claude`. Any other value is an absolute directory. The file stays on the machine: a redeploy keeps it, like `token` and `sessions.json`. Callers send the name in `x-local-profile`; the response repeats it. An unknown name returns HTTP 400. The omitted header means `default`.
+
+```python
+client.messages.create(..., extra_headers={"x-local-profile": "claude-p"})
+```
+
+The server checks a non-default profile's `claude auth status` on first use and keeps that result until restart. Safe mode still ignores that profile's settings, MCP servers, and `CLAUDE.md`. The profile chooses which subscription is billed. Each profile keeps its own account-context announcement, so follow-up transcripts match that login. A saved `/v1/generate` session resumes only on the profile that created it. Sessions saved before profiles existed resume on `default`.
+
+Restart the service after editing `profiles.json`.
+
+Set the variables above in the LaunchAgent's `EnvironmentVariables` or the systemd unit, then reload the service.
 
 macOS service commands (the `local.claude-api` LaunchAgent starts at login and restarts the server if it exits):
 
@@ -235,7 +247,7 @@ launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/local.claude-api.plist
 ```
 
 **Update.** Pull the repository, repeat DEPLOY.md step 2 to copy the files, then restart. Keep the installed
-`token` and `sessions.json`.
+`token`, `profiles.json`, and `sessions.json`.
 
 **Service logs.** `~/.local/share/claude-local-api/server.log` (macOS) or `journalctl --user -u claude-local-api` (Linux).
 
