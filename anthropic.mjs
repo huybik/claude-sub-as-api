@@ -178,6 +178,27 @@ export function validateAnthropic(input, models, efforts) {
   return { ...input, messages, system: systemParts.join('\n\n'), tools: input.tool_choice?.type === 'none' ? [] : tools, effort, schema };
 }
 
+// Claude Code rebuilds every image of the prompt it reads on stdin - the final user message, unless
+// it carries tool results - without its cache_control. A breakpoint on such an image moves to the
+// nearest block before it that can hold one, in that message or an earlier one (which the
+// transcript carries whole), so the prefix up to the image still caches. A block that already
+// holds one keeps its own: validation put the longer TTL first.
+function moveImageMarks(messages) {
+  const prompt = messages.at(-1).content;
+  if (prompt.some(block => block.type === 'tool_result')) return;
+  const holds = block => !['image', 'thinking', 'redacted_thinking'].includes(block.type);
+  prompt.forEach((block, index) => {
+    if (block.type !== 'image' || !block.cache_control) return;
+    const { cache_control, ...image } = block;
+    prompt[index] = image;
+    const earlier = messages.flatMap((message, m) => message.content.map((held, b) => [m, b, held]))
+      .filter(([m, b, held]) => (m < messages.length - 1 || b < index) && holds(held));
+    if (!earlier.length) fail('Claude Code drops the cache breakpoint of an image in the final user message, and no text block comes before it. Mark a text block instead.');
+    const [m, b, held] = earlier.at(-1);
+    messages[m].content[b] = { ...held, cache_control: held.cache_control ?? cache_control };
+  });
+}
+
 // Claude Code announces the account context before the first prompt it sees in a session.
 // A rebuilt history carries that announcement after its first message, where the conversation's
 // first call put it, so a follow-up's prompt starts with the same bytes and reads that call's cache.
@@ -194,6 +215,7 @@ export function prepareAnthropic(input, directory, context) {
     if (input.thinking) args.push('--thinking', input.thinking.type);
     const nativeMessages = input.messages.map(message => ({ ...message, content: message.content.map(block =>
       block.type === 'tool_use' ? { ...block, name: toolPrefix + block.name } : block) }));
+    moveImageMarks(nativeMessages);
     const history = nativeMessages.slice(0, -1);
     let userMessage = nativeMessages.at(-1);
     if (userMessage.content.some(block => block.type === 'tool_result')) {

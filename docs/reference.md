@@ -147,8 +147,13 @@ so marking a shared prefix is the biggest lever on subscription usage.
 - **Block breakpoints.** Put `cache_control: {"type": "ephemeral"}` on a text, image, tool use, or tool result block in
   `messages`, including blocks inside a tool result. The cached prefix runs from the tools and system prompt through
   that block.
+- **Images in the final user message.** Claude Code rebuilds each image it reads on stdin without its `cache_control`,
+  so a breakpoint on such an image moves to the nearest text, tool use or tool result block before it, in that message
+  or an earlier one: the prefix up to the image caches, the image does not. A request with no such block before the
+  image returns HTTP 400. Images in earlier turns, and in a final message of tool results, keep their breakpoints.
 - **Automatic caching.** Set top-level `cache_control`. It marks the last block of the final user message, so the next
-  turn of a conversation reads everything before its new content.
+  turn of a conversation reads everything before its new content. Where that block is an image, the mark moves back as
+  above.
 - **TTL.** `ttl` is `5m` (the default) or `1h`. A request holds at most four breakpoints, and a `1h` breakpoint must
   come before every `5m` one. If the last block already has a breakpoint, top-level `cache_control` must use the same
   TTL. Other requests return HTTP 400.
