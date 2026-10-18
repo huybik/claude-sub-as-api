@@ -177,7 +177,7 @@ call had it. The follow-up's prompt then starts with the same bytes and reads th
 - **Learning the context.** The adapter learns it from the transcript of a profile's first call on each login, then
   deletes that transcript. That first call can miss the cache once.
 - **Login changes.** Every call reads the profile's current login (`oauthAccount.emailAddress` in its `.claude.json`).
-  After `/login` switches accounts, the next call learns the new context, so follow-ups never carry the old one.
+  After `/login` switches accounts, the next call learns the new context instead of reusing the old account's.
 
 **Measured on 2026-10-12** with Haiku 5.5 at low effort and a 15K-token prefix with a five-minute TTL:
 
