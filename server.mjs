@@ -2,7 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { totalmem } from 'node:os';
+import { homedir, totalmem } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -43,7 +43,7 @@ const queue = new RequestQueue(Number(process.env.CLAUDE_LOCAL_API_CONCURRENCY ?
 const activeCalls = new Set();
 const reuse = new ResponseReuse();
 const cloud = new CloudMessages();
-const announced = new Map(); // Account context Claude Code announces, learned once per profile.
+const announced = new Map(); // Profile -> the login and the account context Claude Code announced for it.
 const usage = { started_at: new Date().toISOString(), claude_processes: 0, model_calls: 0, failed_processes: 0,
   input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
 const tokenFields = ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'];
@@ -57,6 +57,12 @@ function reply(response, status, data) {
 }
 function fail(status, message) {
   return Object.assign(new Error(message), { status });
+}
+// One line per failed or cancelled process, so the service log shows why calls fail.
+function logFailure(args, profile, error) {
+  usage.failed_processes++;
+  const model = args[args.indexOf('--model') + 1];
+  console.error(`${new Date().toISOString()} ${profile} ${model} process failed (${error.status ?? error.name}): ${error.message.replace(/\s+/g, ' ').slice(0, 300)}`);
 }
 function event(response, name, data) {
   if (response.destroyed) return;
@@ -76,7 +82,7 @@ function runClaude(args, prompt, signal, onText, bridge = {}) {
     // Messages calls use the SDK control protocol on stdin; a continued tool turn sends no new prompt.
     const control = 'userMessage' in bridge;
     const child = spawn(claude, args, { cwd: directory,
-      env: { ...env, ...bridge.env, ...(bridge.maxTokens ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(bridge.maxTokens) } : {}) } });
+      env: { ...env, ...profileEnv(bridge.profile), ...bridge.env, ...(bridge.maxTokens ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(bridge.maxTokens) } : {}) } });
     // Only the first stop decides the outcome: a client that disconnects after the
     // captured message ends does not turn a delivered answer into a failure.
     function stop(error) {
@@ -134,13 +140,15 @@ function runClaude(args, prompt, signal, onText, bridge = {}) {
       activeCalls.delete(cancel);
       if (messageUsage) addTokens(streamUsage, messageUsage);
       addTokens(usage, result?.usage ?? streamUsage);
-      if (failure) { usage.failed_processes++; return reject(failure); }
+      if (failure) { logFailure(args, bridge.profile, failure); return reject(failure); }
       if (bridge.capture?.complete) return resolve(bridge.capture.message);
       if (!result || code !== 0 || result.is_error || result.subtype !== 'success') {
-        usage.failed_processes++;
-        const message = result?.result || result?.errors?.join('\n') || stderr.trim() || `Claude ended without a successful result (${exitSignal ?? code}).`;
+        // A successful result's text is the model's answer, not an error: keep it out of the message and the log.
+        const message = (result?.is_error && result.result) || result?.errors?.join('\n') || stderr.trim() || `Claude ended without a successful result (${exitSignal ?? code}).`;
         const status = result?.api_error_status === 429 ? 429 : message.includes('--json-schema is not a valid JSON Schema') ? 400 : 502;
-        return reject(fail(status, message));
+        const error = fail(status, message);
+        logFailure(args, bridge.profile, error);
+        return reject(error);
       }
       resolve(result);
     });
@@ -198,6 +206,15 @@ const profiles = loadProfiles();
 function profileEnv(name) {
   const configDir = profiles.get(name);
   return configDir ? { CLAUDE_CONFIG_DIR: configDir } : {};
+}
+// The login Claude Code uses for a profile. It writes .claude.json atomically, so a read never sees half a file.
+function accountEmail(name) {
+  const configPath = join(profiles.get(name) ?? homedir(), '.claude.json');
+  let email;
+  try { email = JSON.parse(readFileSync(configPath, 'utf8')).oauthAccount?.emailAddress; }
+  catch (error) { throw fail(502, `Cannot read the login of profile ${name}: ${error.message}`); }
+  if (!email) throw fail(502, `Profile ${name} has no Claude login in ${configPath}.`);
+  return email;
 }
 function selectedProfile(distinct) {
   const values = distinct['x-local-profile'];
@@ -274,7 +291,10 @@ function baseArgs(model, tools = []) {
 }
 
 async function messagesRequest(input, response, signal, requestID, profile) {
-  const prepared = prepareAnthropic(input, directory, announced.get(profile));
+  // The announced context names the login, and /login can switch it while the service runs.
+  const login = accountEmail(profile);
+  const known = announced.get(profile);
+  const prepared = prepareAnthropic(input, directory, known?.login === login ? known.context : undefined);
   const emit = data => {
     if (!input.stream || response.destroyed) return;
     if (!response.headersSent) response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'request-id': requestID });
@@ -284,7 +304,7 @@ async function messagesRequest(input, response, signal, requestID, profile) {
     const args = [...baseArgs(input.model, input.tools), ...prepared.args, '--permission-prompt-tool', 'stdio'];
     const capture = input.schema ? undefined : new AnthropicMessage(input.model, input.tools, emit);
     const result = await runClaude(args, '', signal, () => {}, {
-      userMessage: prepared.userMessage, env: { ...prepared.env, ...profileEnv(profile) }, system: input.system, tools: input.tools, maxTokens: input.max_tokens, capture,
+      userMessage: prepared.userMessage, env: prepared.env, profile, system: input.system, tools: input.tools, maxTokens: input.max_tokens, capture,
     });
     let message;
     if (capture?.complete) message = capture.message;
@@ -310,7 +330,8 @@ async function messagesRequest(input, response, signal, requestID, profile) {
     if (prepared.sessionId) {
       try {
         const context = sessionContext(prepared.sessionId, profiles.get(profile));
-        if (context) announced.set(profile, context);
+        // A login switched during the call may have announced the other account.
+        if (context && accountEmail(profile) === login) announced.set(profile, { login, context });
       }
       catch (error) { console.error(`Cannot read the session context: ${error.message}`); }
     }
@@ -340,7 +361,7 @@ async function generateRequest(input, response, signal, profile) {
     }
     const result = await runClaude(args, input.prompt, signal, text => {
       if (input.stream) event(response, 'delta', { text });
-    }, { env: profileEnv(profile) });
+    }, { profile });
     const usedModels = Object.keys(result.modelUsage ?? {});
     if (usedModels.length !== 1 || usedModels[0] !== input.model) {
       throw fail(502, `Claude reported an unexpected model: ${usedModels.join(', ')}.`);

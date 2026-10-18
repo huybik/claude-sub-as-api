@@ -9,6 +9,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions: [Sem
 - Fixed: a cache breakpoint on an image in the final user message cached nothing, since Claude Code rebuilds those
   images without it. The breakpoint now moves to the nearest text, tool use or tool result block before the image, in
   that message or an earlier one, so the prefix up to it caches; a request with none before the image returns HTTP 400.
+- Fixed: after `/login` switched accounts, follow-up turns carried the old account's context and missed the cache
+  until the service restarted. Each call now reads the profile's login and relearns the context when it changes.
+- Each failed or cancelled process writes one line to the service log: time, profile, model, status and error.
 - Optional cloud mode on `/v1/messages`, selected by `x-local-backend: cloud`. Supports one user turn, images,
   system text, effort, automatic cloud prompt caching, and buffered SSE. Unsupported controls return HTTP 400.
 - Cloud sessions are archived on completion or cancellation. Usage counters distinguish cloud work from local work.

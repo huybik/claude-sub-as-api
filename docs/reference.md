@@ -121,7 +121,8 @@ curl --fail-with-body http://127.0.0.1:8787/v1/generate \
 | `GET /v1/models` | The three model IDs in a custom `models` array (not the SDK's model-list shape). |
 
 `failed_processes` counts failed or cancelled processes. A client that closes the stream after the answer ends does
-not count. These counters are not a billing or quota report.
+not count. Each one also writes a line to the service log with its time, profile, model, status and error. These
+counters are not a billing or quota report.
 
 ### Errors
 
@@ -173,10 +174,10 @@ for question in questions:   # the first call writes the prefix; the rest read i
 **Follow-up turns.** Claude Code puts your account context (your email address) in front of the first prompt of a
 session. On a follow-up, the adapter puts that context back after the first message, where the conversation's first
 call had it. The follow-up's prompt then starts with the same bytes and reads that call's cache.
-- **Learning the context.** The adapter learns it from the transcript of the first call after the service starts, then
+- **Learning the context.** The adapter learns it from the transcript of a profile's first call on each login, then
   deletes that transcript. That first call can miss the cache once.
-- **After a login change, restart the service.** Until then, follow-ups carry the old account's context and miss the
-  cache.
+- **Login changes.** Every call reads the profile's current login (`oauthAccount.emailAddress` in its `.claude.json`).
+  After `/login` switches accounts, the next call learns the new context instead of reusing the old account's.
 
 **Measured on 2026-10-12** with Haiku 5.5 at low effort and a 15K-token prefix with a five-minute TTL:
 
@@ -303,7 +304,7 @@ Unsupported input fails explicitly; it is never silently converted to different 
 | Service won't start; log says "Run claude auth login…" | Run `claude auth login`, choose your subscription, then restart the service. |
 | `401 Invalid local API token` | Read the key from `~/.local/share/claude-local-api/token`; don't use an Anthropic API key. |
 | `429` errors | Your subscription's usage limit was reached. Wait for the reset; the server never falls back to a paid API. |
-| Cache reads stay at 0 | Mark a block with `cache_control`, or set top-level `cache_control`. After a login change, restart the service. |
+| Cache reads stay at 0 | Mark a block with `cache_control`, or set top-level `cache_control`. |
 | Port 8787 in use | Stop the other process, or set `CLAUDE_LOCAL_API_PORT`. |
 
 ## Project layout

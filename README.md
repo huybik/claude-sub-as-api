@@ -125,7 +125,6 @@ reply = client.messages.create(
   - a cache breakpoint on an image of the final user message with no text block before it: Claude Code drops an
     image's breakpoint, so it moves to the nearest earlier text block.
 - **Limits.** Subscription limits return HTTP 429. The server never falls back to a paid API.
-- **Login change.** Restart the service after you switch Claude logins.
 
 ## Docs
 
