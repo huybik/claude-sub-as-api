@@ -143,7 +143,8 @@ function runClaude(args, prompt, signal, onText, bridge = {}) {
       if (failure) { logFailure(args, bridge.profile, failure); return reject(failure); }
       if (bridge.capture?.complete) return resolve(bridge.capture.message);
       if (!result || code !== 0 || result.is_error || result.subtype !== 'success') {
-        const message = result?.result || result?.errors?.join('\n') || stderr.trim() || `Claude ended without a successful result (${exitSignal ?? code}).`;
+        // A successful result's text is the model's answer, not an error: keep it out of the message and the log.
+        const message = (result?.is_error && result.result) || result?.errors?.join('\n') || stderr.trim() || `Claude ended without a successful result (${exitSignal ?? code}).`;
         const status = result?.api_error_status === 429 ? 429 : message.includes('--json-schema is not a valid JSON Schema') ? 400 : 502;
         const error = fail(status, message);
         logFailure(args, bridge.profile, error);
