@@ -2,7 +2,6 @@ import { execFile, spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { connect } from 'node:net';
 import { homedir, totalmem } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -213,13 +212,14 @@ function loadProfiles() {
       loaded.set(name, { configDir: configDirectory(name, value), baseUrl: null });
       continue;
     }
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    if (typeof value !== 'object' || Array.isArray(value)) {
       throw new Error(`Profile ${name} must be an absolute config directory or an object with base_url.`);
     }
     const unknown = Object.keys(value).filter(key => !['base_url', 'config_dir'].includes(key));
     if (unknown.length) throw new Error(`Profile ${name} has unsupported fields: ${unknown.join(', ')}.`);
     // Claude Code sends the profile's login token to this URL, so it must stay on this machine.
-    if (typeof value.base_url !== 'string' || !/^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d{1,5}(?:\/\S*)?$/.test(value.base_url)) {
+    if (typeof value.base_url !== 'string' || !/^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):[1-9]\d{0,4}(?:\/\S*)?$/.test(value.base_url)
+      || !URL.canParse(value.base_url)) {
       throw new Error(`Profile ${name} base_url must be http://127.0.0.1, localhost or [::1] with a port.`);
     }
     loaded.set(name, { configDir: value.config_dir === undefined ? null : configDirectory(name, value.config_dir), baseUrl: value.base_url });
@@ -227,28 +227,11 @@ function loadProfiles() {
   return loaded;
 }
 const profiles = loadProfiles();
+// The proxy does the retrying. Claude Code's own retries would hold a call for minutes on a refused connection or on
+// a 429 with a short retry-after, which TeamClaude sends when an account is pinned.
 function profileEnv(name) {
   const { configDir, baseUrl } = profiles.get(name);
-  return { ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}), ...(baseUrl ? { ANTHROPIC_BASE_URL: baseUrl } : {}) };
-}
-// Claude Code retries a refused connection for about three minutes, so a proxy profile checks that its proxy listens
-// before each call, as `teamclaude run` does.
-function checkProxy(name) {
-  const { baseUrl } = profiles.get(name);
-  if (!baseUrl) return;
-  const { hostname, port } = new URL(baseUrl);
-  return new Promise((resolve, reject) => {
-    const socket = connect({ host: hostname.replace(/^\[|\]$/g, ''), port: Number(port || 80) });
-    const done = problem => {
-      socket.destroy();
-      if (problem) reject(fail(502, `Profile ${name} calls through ${baseUrl}, which does not answer (${problem}). Start the proxy.`));
-      else resolve();
-    };
-    socket.setTimeout(2000);
-    socket.once('connect', () => done());
-    socket.once('timeout', () => done('timed out'));
-    socket.once('error', error => done(error.code ?? error.message));
-  });
+  return { ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}), ...(baseUrl ? { ANTHROPIC_BASE_URL: baseUrl, CLAUDE_CODE_MAX_RETRIES: '0' } : {}) };
 }
 // The login Claude Code uses for a profile. It writes .claude.json atomically, so a read never sees half a file.
 function accountEmail(name) {
@@ -321,10 +304,7 @@ async function onProfile(requested, model, response, run) {
     if (requested) checkQuota(requested, model);
     if (quota.current !== previous) console.error(`${new Date().toISOString()} calls without x-local-profile moved from ${previous} to ${quota.current}`);
     if (!response.headersSent) response.setHeader('x-local-profile', profile);
-    try {
-      await checkProxy(profile);
-      return await run(profile, accountEmail(profile));
-    }
+    try { return await run(profile, accountEmail(profile)); }
     catch (error) {
       const until = error.status === 429 ? quota.spentUntil(profile, model) : 0;
       if (!until) throw error;

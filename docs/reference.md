@@ -136,7 +136,7 @@ Errors on `/v1/messages` use the Anthropic error shape: `{"type":"error","error"
 | 413 | Request body over 32 MiB (`/v1/messages`) or 1 MiB (`/v1/generate`). |
 | 415 | Content type is not `application/json`. |
 | 429 | Every profile the call may use is out of quota, or upstream refused it with another rate limit. `retry-after` gives the seconds until a known reset. |
-| 502 | Claude Code failed or returned something unexpected, or a proxy profile's proxy does not answer. Upstream request errors also arrive as 502. |
+| 502 | Claude Code failed or returned something unexpected. Upstream request errors, and a proxy profile's proxy being down, also arrive as 502. |
 | 503 | The service is stopping, or cloud mode is not configured. |
 | 504 | The call ran past the twenty-minute limit. |
 
@@ -248,10 +248,10 @@ The server checks every profile's `claude auth status` at startup and does not s
   since Claude Code sends the profile's login token to it. A path is kept, so TeamClaude's `/tc-acct/<account>` pin works.
 - `config_dir` is optional; without it Claude Code uses `~/.claude`. Claude Code checks that login before it sends
   anything, and TeamClaude swaps in a token from its own pool.
-- Before each call the server checks that the proxy accepts connections, and returns HTTP 502 at once when it doesn't.
-  Claude Code would otherwise retry for about three minutes.
-- Quota reports describe whichever account the proxy used, so the profile is out of quota only when the proxy refuses
-  the call. TeamClaude does that once its whole pool is spent.
+- Claude Code's own retries are off (`CLAUDE_CODE_MAX_RETRIES=0`), since the proxy retries upstream. So a call fails
+  within about two seconds while the proxy is down (HTTP 502), and it doesn't move to another profile.
+- Quota reports describe whichever account the proxy used. TeamClaude refuses a call once its whole pool is spent,
+  with a 429 that has no reset time, and the profile then counts as out of quota for one minute.
 - Leave TeamClaude's `holdSeconds` off: Claude Code gives up on a request after ten minutes.
 
 Restart the service after editing `profiles.json`.
@@ -260,7 +260,8 @@ Restart the service after editing `profiles.json`.
 profile's last report, keyed by that profile's login, so a `/login` to another account starts over.
 
 - **A profile is out of quota** when a call is refused (`status: "rejected"` without extra usage). It stays out until
-  the reported reset time, even if a call admitted earlier reports success afterwards. A weekly cap on one model family
+  the reported reset time, or for one minute when the refusal reports none, even if a call admitted earlier reports
+  success afterwards. A weekly cap on one model family
   (`seven_day_opus`, `seven_day_sonnet`) blocks only that family on that profile.
 - **Calls without `x-local-profile`** use the current profile, which starts as the first in `profiles.json`. When the
   current profile is out of quota, it moves to the first profile in file order that has quota left. Staying on one
@@ -335,7 +336,7 @@ Unsupported input fails explicitly; it is never silently converted to different 
 | Service won't start; log says "Run claude auth login…" | Run `claude auth login`, choose your subscription, then restart the service. |
 | `401 Invalid local API token` | Read the key from `~/.local/share/claude-local-api/token`; don't use an Anthropic API key. |
 | `429` errors | The profiles the call may use are out of quota; `/v1/health` shows when each resets. Add a profile, wait for the reset, or restart after raising a limit. The server never falls back to a paid API. |
-| `502 Profile … which does not answer` | Start that profile's proxy (`teamclaude server`), or remove the profile and restart. |
+| `502 API Error: Connection refused` on a proxy profile | Start that profile's proxy (`teamclaude server`), or remove the profile and restart. |
 | Cache reads stay at 0 | Mark a block with `cache_control`, or set top-level `cache_control`. |
 | Port 8787 in use | Stop the other process, or set `CLAUDE_LOCAL_API_PORT`. |
 

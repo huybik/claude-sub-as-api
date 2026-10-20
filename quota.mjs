@@ -26,10 +26,11 @@ export class ProfileQuota {
     const key = `${profile}\n${login}`;
     const report = this.reports.get(key) ?? { spent: {}, started: -Infinity };
     // Claude Code's own rule: rejected without extra usage refuses calls until resetsAt (seconds). A call admitted
-    // before the limit can still report allowed afterwards, so only the reset ends a spent scope.
-    if (info.status === 'rejected' && !info.isUsingOverage && info.resetsAt) {
+    // before the limit can still report allowed afterwards, so only the reset ends a spent scope. A refusal without a
+    // reset time, such as TeamClaude's own 429 once its pool is spent, holds for a minute.
+    if (info.status === 'rejected' && !info.isUsingOverage) {
       const scope = familyLimits[info.rateLimitType] ?? 'all';
-      report.spent[scope] = Math.max(report.spent[scope] ?? 0, info.resetsAt * 1000);
+      report.spent[scope] = Math.max(report.spent[scope] ?? 0, info.resetsAt ? info.resetsAt * 1000 : Date.now() + 60_000);
     }
     // The newest call's report wins, so an older one can't undo a move to extra usage.
     if (started >= report.started) Object.assign(report, { info, started });

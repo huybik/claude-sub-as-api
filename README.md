@@ -102,7 +102,7 @@ See the [cloud reference](docs/reference.md#cloud-mode-experimental) for exact l
 
 ## Profiles
 
-Profiles are the Claude subscriptions the server can use. Names come from [`profiles.json`](profiles.json). `default` is the normal `~/.claude` login. Other names set `CLAUDE_CONFIG_DIR` for that call. Every profile must be logged in when the server starts.
+Profiles are the Claude subscriptions the server can use. Names come from [`profiles.json`](profiles.json). `default` is the normal `~/.claude` login. Other names set `CLAUDE_CONFIG_DIR` for that call, or go through TeamClaude (below). Every profile must be logged in when the server starts.
 
 - **No header:** the call stays on one profile, in `profiles.json` order, until that subscription's limit is reached.
   Then it moves to the first profile in that order with quota left, so a conversation's prompt cache is lost only when it has to move.

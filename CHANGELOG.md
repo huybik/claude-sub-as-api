@@ -5,8 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions: [Sem
 ## Unreleased
 
 - A profile can send its calls through a local proxy such as TeamClaude, as `teamclaude run --no-mitm` does:
-  `{"base_url": "http://localhost:3456"}` in `profiles.json`, with an optional `config_dir`. While the proxy is down,
-  its calls fail at once with HTTP 502.
+  `{"base_url": "http://localhost:3456"}` in `profiles.json`, with an optional `config_dir`. Claude Code's retries are
+  off there, so its calls fail within seconds while the proxy is down.
+- A quota refusal without a reset time, such as TeamClaude's once its pool is spent, puts the profile out of quota for
+  one minute instead of being ignored, so calls without `x-local-profile` move on.
 - Calls without `x-local-profile` rotate across `profiles.json`: they stay on one profile until its subscription limit
   is reached, then move to the next with quota left. A call refused before its stream starts is retried there.
 - A profile that is out of quota fails calls naming it at once with HTTP 429 and `retry-after`, without starting a process.
