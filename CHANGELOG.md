@@ -4,6 +4,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions: [Sem
 
 ## Unreleased
 
+- Calls without `x-local-profile` rotate across `profiles.json`: they stay on one profile until its subscription limit
+  is reached, then move to the next with quota left. A call refused before its stream starts is retried there.
+- A profile that is out of quota fails calls naming it at once with HTTP 429 and `retry-after`, without starting a process.
+- `/v1/health` reports each profile's last quota report; `/v1/usage` adds per-profile token totals.
 - `x-local-profile` selects a Claude subscription from `profiles.json`. `default` leaves `CLAUDE_CONFIG_DIR` unset. Cloud mode accepts only `default`.
 - Response cache and request sharing keys include the profile. Saved `/v1/generate` sessions resume on the profile that started them.
 - Fixed: a cache breakpoint on an image in the final user message cached nothing, since Claude Code rebuilds those

@@ -47,6 +47,7 @@ It keeps your usage low by caching what you mark, as the API does.
 - **Messages API features:** streaming, tool use, images, structured output, effort levels, and adaptive thinking.
 - **Models:** Sonnet 5.5, Opus 5.5, and Haiku 5.5.
 - **Prompt caching** with `cache_control`. Shared prefixes, follow-ups, and tool turns read about 97% from the cache.
+- **Several subscriptions:** calls stay on one [profile](#profiles) until its limit is reached, then move to the next.
 - **Concurrency:** one concurrent call per GiB of RAM (48 on a 48 GB Mac), the rest wait; plus a local response cache
   and a usage counter.
 - **Service:** runs as a macOS LaunchAgent or a Linux systemd unit, bound to `127.0.0.1` behind a local key.
@@ -100,7 +101,13 @@ See the [cloud reference](docs/reference.md#cloud-mode-experimental) for exact l
 
 ## Profiles
 
-`x-local-profile` chooses which Claude subscription a call uses. Names come from [`profiles.json`](profiles.json). `default` is the normal `~/.claude` login. Other names set `CLAUDE_CONFIG_DIR` for that call. Cloud mode accepts only `default`.
+Profiles are the Claude subscriptions the server can use. Names come from [`profiles.json`](profiles.json). `default` is the normal `~/.claude` login. Other names set `CLAUDE_CONFIG_DIR` for that call.
+
+- **No header:** the call stays on one profile, in `profiles.json` order, until that subscription's limit is reached.
+  Then it moves to the next profile with quota left, so a conversation's prompt cache is lost only when it has to move.
+- **`x-local-profile: <name>`:** the call uses that profile only. While the profile is out of quota, calls fail at
+  once with HTTP 429 and `retry-after`.
+- **Cloud mode** accepts only `default`.
 
 ```python
 reply = client.messages.create(
@@ -124,7 +131,8 @@ reply = client.messages.create(
   - cache breakpoints on `system` or `tools`, more than four breakpoints, or `1h` after `5m`,
   - a cache breakpoint on an image of the final user message with no text block before it: Claude Code drops an
     image's breakpoint, so it moves to the nearest earlier text block.
-- **Limits.** Subscription limits return HTTP 429. The server never falls back to a paid API.
+- **Limits.** HTTP 429 once every profile the call may use is out of quota. The server never falls back to a paid API.
+  `/v1/health` shows each profile's last reported quota.
 
 ## Docs
 

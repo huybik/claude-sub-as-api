@@ -10,6 +10,7 @@ import { RequestQueue } from './queue.mjs';
 import { ResponseReuse, reuseOptions } from './reuse.mjs';
 import { CloudMessages, validateCloud, emitCloudMessage } from './cloud.mjs';
 import { AnthropicMessage, anthropicError, prepareAnthropic, sessionContext, toolControl, validateAnthropic } from './anthropic.mjs';
+import { ProfileQuota } from './quota.mjs';
 
 const directory = fileURLToPath(new URL('.', import.meta.url));
 const claude = 'claude';
@@ -45,7 +46,7 @@ const reuse = new ResponseReuse();
 const cloud = new CloudMessages();
 const announced = new Map(); // Profile -> the login and the account context Claude Code announced for it.
 const usage = { started_at: new Date().toISOString(), claude_processes: 0, model_calls: 0, failed_processes: 0,
-  input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, profiles: {} };
 const tokenFields = ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'];
 function addTokens(target, source) {
   for (const key of tokenFields) target[key] = (target[key] ?? 0) + (source?.[key] ?? 0);
@@ -73,11 +74,12 @@ function event(response, name, data) {
 function runClaude(args, prompt, signal, onText, bridge = {}) {
   signal.throwIfAborted();
   usage.claude_processes++;
+  const model = args[args.indexOf('--model') + 1];
   return new Promise((resolve, reject) => {
     let pending = '', stderr = '';
     let result, messageUsage;
     const streamUsage = {};
-    let failure, killTimer;
+    let failure, killTimer, limitsTimer;
     let stopping = false, closed = false;
     // Messages calls use the SDK control protocol on stdin; a continued tool turn sends no new prompt.
     const control = 'userMessage' in bridge;
@@ -93,7 +95,7 @@ function runClaude(args, prompt, signal, onText, bridge = {}) {
       child.kill('SIGTERM');
       killTimer = setTimeout(() => child.kill('SIGKILL'), 1000);
     }
-    const cancel = () => stop(signal.reason ?? fail(503, 'The service is stopping.'));
+    const cancel = () => stop(bridge.capture?.complete ? undefined : signal.reason ?? fail(503, 'The service is stopping.'));
     const timeout = setTimeout(() => stop(fail(504, 'Claude exceeded the twenty-minute execution limit.')), options.timeout);
     const send = message => child.stdin.write(JSON.stringify(message) + '\n');
     function consume(line) {
@@ -105,6 +107,10 @@ function runClaude(args, prompt, signal, onText, bridge = {}) {
           if (event?.type === 'message_start') { usage.model_calls++; messageUsage = { ...event.message.usage }; }
           if (event?.type === 'message_delta' && messageUsage) Object.assign(messageUsage, event.usage);
           if (event?.type === 'message_stop' && messageUsage) { addTokens(streamUsage, messageUsage); messageUsage = undefined; }
+        }
+        if (message.type === 'rate_limit_event') {
+          quota.record(bridge.profile, bridge.login, model, message.rate_limit_info);
+          if (bridge.capture?.complete) stop();
         }
         if (message.type === 'control_response' && message.response.request_id === 'local-init') {
           if (message.response.subtype !== 'success') throw fail(502, message.response.error || 'Claude initialization failed.');
@@ -119,7 +125,8 @@ function runClaude(args, prompt, signal, onText, bridge = {}) {
           if (control) child.stdin.end();
         }
         if (message.type === 'stream_event' && !message.parent_tool_use_id && bridge.capture) {
-          if (bridge.capture.accept(message.event)) stop();
+          // The call's rate_limit_event follows its message, before any tool runs: stop on it, or a second later.
+          if (bridge.capture.accept(message.event)) limitsTimer ??= setTimeout(stop, 1000);
         }
         if (message.type === 'stream_event' && !message.parent_tool_use_id && message.event?.delta?.type === 'text_delta') {
           onText(message.event.delta.text);
@@ -136,10 +143,12 @@ function runClaude(args, prompt, signal, onText, bridge = {}) {
       closed = true;
       clearTimeout(timeout);
       clearTimeout(killTimer);
+      clearTimeout(limitsTimer);
       signal.removeEventListener('abort', cancel);
       activeCalls.delete(cancel);
       if (messageUsage) addTokens(streamUsage, messageUsage);
       addTokens(usage, result?.usage ?? streamUsage);
+      addTokens(usage.profiles[bridge.profile] ??= {}, result?.usage ?? streamUsage);
       if (failure) { logFailure(args, bridge.profile, failure); return reject(failure); }
       if (bridge.capture?.complete) return resolve(bridge.capture.message);
       if (!result || code !== 0 || result.is_error || result.subtype !== 'success') {
@@ -216,9 +225,11 @@ function accountEmail(name) {
   if (!email) throw fail(502, `Profile ${name} has no Claude login in ${configPath}.`);
   return email;
 }
+const quota = new ProfileQuota([...profiles.keys()], accountEmail);
+// No header: the call runs on the profile quota.mjs chooses.
 function selectedProfile(distinct) {
   const values = distinct['x-local-profile'];
-  if (values === undefined) return 'default';
+  if (values === undefined) return null;
   if (values.length !== 1) throw fail(400, 'Send one x-local-profile header.');
   if (!profiles.has(values[0])) throw fail(400, `x-local-profile must be one of: ${[...profiles.keys()].join(', ')}.`);
   return values[0];
@@ -282,6 +293,35 @@ async function assertProfileLogin(name, signal) {
   profileLogins.set(name, true);
 }
 
+const secondsUntil = until => Math.max(1, Math.ceil((until - Date.now()) / 1000));
+function outOfQuota(profile, until) {
+  const known = Number.isFinite(until);
+  const error = fail(429, `${profile ? `Profile ${profile} is` : 'Every profile is'} out of quota${known ? ` until ${new Date(until).toISOString()}` : ''}.`);
+  if (known) error.retryAfter = secondsUntil(until);
+  return error;
+}
+// A named profile never changes, and while it is spent its calls fail without starting a process. A call without
+// x-local-profile moves to the next profile when Claude Code reports this one spent, unless its stream has started.
+async function onProfile(requested, model, response, signal, run) {
+  const tried = new Set();
+  for (;;) {
+    const previous = quota.current;
+    const profile = requested ?? quota.choose(model, tried);
+    if (quota.current !== previous) console.error(`${new Date().toISOString()} calls without x-local-profile moved from ${previous} to ${quota.current}`);
+    const until = profile ? quota.spentUntil(profile, model) : quota.nextReset(model);
+    if (!profile || until) throw outOfQuota(profile, until);
+    await assertProfileLogin(profile, signal);
+    if (!response.headersSent) response.setHeader('x-local-profile', profile);
+    try { return await run(profile, accountEmail(profile)); }
+    catch (error) {
+      const spentUntil = error.status === 429 ? quota.spentUntil(profile, model) : 0;
+      if (!spentUntil) throw error;
+      if (requested || response.headersSent) throw Object.assign(error, { retryAfter: secondsUntil(spentUntil) });
+      tried.add(profile);
+    }
+  }
+}
+
 function baseArgs(model, tools = []) {
   const mcpServers = tools.length ? { client: { type: 'sdk', name: 'client' } } : {};
   return ['-p', '--safe-mode', '--setting-sources', '',
@@ -290,9 +330,8 @@ function baseArgs(model, tools = []) {
     '--model', model, '--output-format', 'stream-json', '--verbose', '--include-partial-messages'];
 }
 
-async function messagesRequest(input, response, signal, requestID, profile) {
-  // The announced context names the login, and /login can switch it while the service runs.
-  const login = accountEmail(profile);
+// The announced context names the login, and /login can switch it while the service runs.
+async function messagesRequest(input, response, signal, requestID, profile, login) {
   const known = announced.get(profile);
   const prepared = prepareAnthropic(input, directory, known?.login === login ? known.context : undefined);
   const emit = data => {
@@ -304,7 +343,7 @@ async function messagesRequest(input, response, signal, requestID, profile) {
     const args = [...baseArgs(input.model, input.tools), ...prepared.args, '--permission-prompt-tool', 'stdio'];
     const capture = input.schema ? undefined : new AnthropicMessage(input.model, input.tools, emit);
     const result = await runClaude(args, '', signal, () => {}, {
-      userMessage: prepared.userMessage, env: prepared.env, profile, system: input.system, tools: input.tools, maxTokens: input.max_tokens, capture,
+      userMessage: prepared.userMessage, env: prepared.env, profile, login, system: input.system, tools: input.tools, maxTokens: input.max_tokens, capture,
     });
     let message;
     if (capture?.complete) message = capture.message;
@@ -338,7 +377,7 @@ async function messagesRequest(input, response, signal, requestID, profile) {
   }
 }
 
-async function generateRequest(input, response, signal, profile) {
+async function generateRequest(input, response, signal, profile, login) {
   let cleanup;
   try {
     const sessionID = input.session_id ?? (input.save_session ? randomUUID() : null);
@@ -361,7 +400,7 @@ async function generateRequest(input, response, signal, profile) {
     }
     const result = await runClaude(args, input.prompt, signal, text => {
       if (input.stream) event(response, 'delta', { text });
-    }, { profile });
+    }, { profile, login });
     const usedModels = Object.keys(result.modelUsage ?? {});
     if (usedModels.length !== 1 || usedModels[0] !== input.model) {
       throw fail(502, `Claude reported an unexpected model: ${usedModels.join(', ')}.`);
@@ -402,8 +441,8 @@ const server = createServer(async (request, response) => {
   request.on('aborted', cancel);
   try {
     if (request.headers.authorization !== `Bearer ${token}` && request.headers['x-api-key'] !== token) throw fail(401, 'Invalid local API token.');
-    const profile = selectedProfile(request.headersDistinct);
-    response.setHeader('x-local-profile', profile);
+    const requested = selectedProfile(request.headersDistinct);
+    if (requested) response.setHeader('x-local-profile', requested);
     if (request.method === 'GET' && path === '/v1/models') {
       return reply(response, 200, { models });
     }
@@ -415,8 +454,8 @@ const server = createServer(async (request, response) => {
         status: 'ok', busy: queue.active > 0, active: queue.active, queued: queue.waiting.length,
         max_concurrency: queue.limit, uptime_seconds: Math.floor(process.uptime()),
         cloud: { configured: Boolean(cloud.environment), streaming: 'buffered', max_tokens: 128000, history: false, client_tools: false, prompt_cache_control: false },
-        profiles: [...profiles.keys()],
-        features: ['streaming', 'sessions', 'structured_output', 'effort', 'anthropic_messages', 'images', 'client_tools', 'request_queue', 'usage', 'response_cache', 'request_coalescing', 'profiles'],
+        profiles: [...profiles.keys()], quota: quota.status(),
+        features: ['streaming', 'sessions', 'structured_output', 'effort', 'anthropic_messages', 'images', 'client_tools', 'request_queue', 'usage', 'response_cache', 'request_coalescing', 'profiles', 'profile_rotation'],
       });
     }
     if (request.method !== 'POST' || !['/v1/generate', '/v1/messages'].includes(path)) throw fail(404, 'Unknown endpoint.');
@@ -424,7 +463,10 @@ const server = createServer(async (request, response) => {
     if (!['local', 'cloud'].includes(backend)) throw fail(400, 'x-local-backend must be local or cloud.');
     if (backend === 'cloud' && !anthropic) throw fail(400, 'Cloud mode is available only on /v1/messages.');
     response.setHeader('x-local-backend', backend);
-    if (backend === 'cloud' && profile !== 'default') throw fail(400, 'Cloud mode uses the default Claude login.');
+    if (backend === 'cloud') {
+      if ((requested ?? 'default') !== 'default') throw fail(400, 'Cloud mode uses the default Claude login.');
+      response.setHeader('x-local-profile', 'default');
+    }
     if (!/^application\/json(?:;|$)/i.test(request.headers['content-type'] ?? '')) {
       throw fail(415, 'Send Content-Type: application/json.');
     }
@@ -440,8 +482,9 @@ const server = createServer(async (request, response) => {
     try { input = JSON.parse(body); } catch { throw fail(400, 'Invalid JSON.'); }
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw fail(400, 'Send a JSON object.');
     async function execute(input) {
-      await assertProfileLogin(profile, signal);
-      const settings = reuseOptions(request.headers, path, body, input, backend, profile);
+      // A saved session resumes on the profile that holds its transcript.
+      const pinned = input.session_id ? sessions[input.session_id].profile ?? 'default' : requested;
+      const settings = reuseOptions(request.headers, path, body, input, backend, requested ?? '*');
       const result = await reuse.run(settings, signal, async workSignal => {
         const release = await queue.acquire(workSignal, input.session_id);
         try {
@@ -453,7 +496,8 @@ const server = createServer(async (request, response) => {
             try { return await cloud.run(input, AbortSignal.any([workSignal, shutdown.signal])); }
             finally { activeCalls.delete(stop); }
           }
-          return await (anthropic ? messagesRequest(input, response, workSignal, requestID, profile) : generateRequest(input, response, workSignal, profile));
+          return await onProfile(pinned, input.model, response, workSignal, (profile, login) => anthropic
+            ? messagesRequest(input, response, workSignal, requestID, profile, login) : generateRequest(input, response, workSignal, profile, login));
         } finally { release(); }
       });
       if (!response.headersSent) response.setHeader('x-local-reuse', result.source);
@@ -496,7 +540,7 @@ const server = createServer(async (request, response) => {
       }
       if (!Object.hasOwn(sessions, input.session_id)) throw fail(404, 'Unknown saved session.');
       if (sessions[input.session_id].model !== input.model) throw fail(400, 'Use the original model for this session.');
-      if ((sessions[input.session_id].profile ?? 'default') !== profile) throw fail(400, 'Use the original profile for this session.');
+      if (requested && (sessions[input.session_id].profile ?? 'default') !== requested) throw fail(400, 'Use the original profile for this session.');
       if (input.save_session !== undefined || input.system !== undefined) {
         throw fail(400, 'Set save_session and system only when starting a session.');
       }
@@ -511,7 +555,10 @@ const server = createServer(async (request, response) => {
     if (response.headersSent) {
       event(response, 'error', data);
       response.end();
-    } else reply(response, status, data);
+    } else {
+      if (error.retryAfter) response.setHeader('retry-after', String(error.retryAfter));
+      reply(response, status, data);
+    }
   } finally {
     response.off('close', cancel);
     request.off('aborted', cancel);

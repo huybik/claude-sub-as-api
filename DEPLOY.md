@@ -23,7 +23,7 @@ Install directory: `~/.local/share/claude-local-api` (call it `INSTALL_DIR`). Th
 
 ```sh
 mkdir -p ~/.local/share/claude-local-api/docs ~/.local/bin
-cp server.mjs anthropic.mjs cloud.mjs queue.mjs reuse.mjs README.md CONTEXT.md CHANGELOG.md ~/.local/share/claude-local-api/
+cp server.mjs anthropic.mjs cloud.mjs queue.mjs reuse.mjs quota.mjs README.md CONTEXT.md CHANGELOG.md ~/.local/share/claude-local-api/
 cp docs/reference.md ~/.local/share/claude-local-api/docs/
 ```
 
