@@ -136,7 +136,7 @@ Errors on `/v1/messages` use the Anthropic error shape: `{"type":"error","error"
 | 413 | Request body over 32 MiB (`/v1/messages`) or 1 MiB (`/v1/generate`). |
 | 415 | Content type is not `application/json`. |
 | 429 | Every profile the call may use is out of quota, or upstream refused it with another rate limit. `retry-after` gives the seconds until a known reset. |
-| 502 | Claude Code failed or returned something unexpected. Upstream request errors also arrive as 502. |
+| 502 | Claude Code failed or returned something unexpected, or a proxy profile's proxy does not answer. Upstream request errors also arrive as 502. |
 | 503 | The service is stopping, or cloud mode is not configured. |
 | 504 | The call ran past the twenty-minute limit. |
 
@@ -232,13 +232,27 @@ client.messages.create(..., extra_headers={"x-local-cache": "false", "x-local-co
 
 ### Profiles
 
-`profiles.json`, next to `server.mjs`, maps a name to a Claude Code config directory. The server creates it on first start with `{"default": null}` and mode 0600. `default` leaves `CLAUDE_CONFIG_DIR` unset so Claude uses `~/.claude`. Any other value is an absolute directory. The file stays on the machine: a redeploy keeps it, like `token` and `sessions.json`. An unknown name in `x-local-profile` returns HTTP 400. The response's `x-local-profile` names the profile that served the call. A response reused from the local cache or shared with an identical call names none unless the request named one.
+`profiles.json`, next to `server.mjs`, maps a name to a Claude Code config directory. The server creates it on first start with `{"default": null}` and mode 0600. `default` leaves `CLAUDE_CONFIG_DIR` unset so Claude uses `~/.claude`. Any other value is an absolute directory, or a proxy object (below). The file stays on the machine: a redeploy keeps it, like `token` and `sessions.json`. An unknown name in `x-local-profile` returns HTTP 400. The response's `x-local-profile` names the profile that served the call. A response reused from the local cache or shared with an identical call names none unless the request named one.
 
 ```python
 client.messages.create(..., extra_headers={"x-local-profile": "claude-p"})
 ```
 
 The server checks every profile's `claude auth status` at startup and does not start while one is not logged in with a subscription. Safe mode still ignores that profile's settings, MCP servers, and `CLAUDE.md`. The profile chooses which subscription is billed. Each profile keeps its own account-context announcement, so follow-up transcripts match that login. A saved `/v1/generate` session resumes only on the profile that created it, with or without the header. Sessions saved before profiles existed resume on `default`.
+
+**Proxy profiles.** An object sends the profile's calls through a local Anthropic proxy such as
+[TeamClaude](https://github.com/KarpelesLab/teamclaude), as `teamclaude run --no-mitm` does:
+`{"base_url": "http://localhost:3456", "config_dir": "/Users/me/.claude-p"}`.
+
+- `base_url` becomes `ANTHROPIC_BASE_URL`. It must be `http://` on `127.0.0.1`, `localhost` or `[::1]` with a port,
+  since Claude Code sends the profile's login token to it. A path is kept, so TeamClaude's `/tc-acct/<account>` pin works.
+- `config_dir` is optional; without it Claude Code uses `~/.claude`. Claude Code checks that login before it sends
+  anything, and TeamClaude swaps in a token from its own pool.
+- Before each call the server checks that the proxy accepts connections, and returns HTTP 502 at once when it doesn't.
+  Claude Code would otherwise retry for about three minutes.
+- Quota reports describe whichever account the proxy used, so the profile is out of quota only when the proxy refuses
+  the call. TeamClaude does that once its whole pool is spent.
+- Leave TeamClaude's `holdSeconds` off: Claude Code gives up on a request after ten minutes.
 
 Restart the service after editing `profiles.json`.
 
@@ -321,6 +335,7 @@ Unsupported input fails explicitly; it is never silently converted to different 
 | Service won't start; log says "Run claude auth login…" | Run `claude auth login`, choose your subscription, then restart the service. |
 | `401 Invalid local API token` | Read the key from `~/.local/share/claude-local-api/token`; don't use an Anthropic API key. |
 | `429` errors | The profiles the call may use are out of quota; `/v1/health` shows when each resets. Add a profile, wait for the reset, or restart after raising a limit. The server never falls back to a paid API. |
+| `502 Profile … which does not answer` | Start that profile's proxy (`teamclaude server`), or remove the profile and restart. |
 | Cache reads stay at 0 | Mark a block with `cache_control`, or set top-level `cache_control`. |
 | Port 8787 in use | Stop the other process, or set `CLAUDE_LOCAL_API_PORT`. |
 

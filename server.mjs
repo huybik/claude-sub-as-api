@@ -2,6 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { connect } from 'node:net';
 import { homedir, totalmem } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -180,7 +181,17 @@ function runClaude(args, prompt, signal, onText, bridge = {}) {
   });
 }
 
-// Names in profiles.json. null keeps CLAUDE_CONFIG_DIR unset, which is the default ~/.claude login.
+function configDirectory(name, value) {
+  if (typeof value !== 'string' || !isAbsolute(value)) throw new Error(`Profile ${name} config directory must be an absolute path.`);
+  const configDir = resolve(value);
+  if (!statSync(configDir, { throwIfNoEntry: false })?.isDirectory()) {
+    throw new Error(`Profile ${name} config directory does not exist: ${configDir}`);
+  }
+  return configDir;
+}
+// Names in profiles.json. A name maps to a config directory, or to an object whose base_url sends the profile's calls
+// through a local proxy, as `teamclaude run --no-mitm` does. No config directory (default, or an object without
+// config_dir) keeps CLAUDE_CONFIG_DIR unset, which is the default ~/.claude login.
 function loadProfiles() {
   const profilesPath = join(directory, 'profiles.json');
   if (!existsSync(profilesPath)) writeFileSync(profilesPath, '{\n  "default": null\n}\n', { mode: 0o600 });
@@ -194,27 +205,54 @@ function loadProfiles() {
     // A leading letter keeps file order: JavaScript lists integer-like keys first.
     if (!/^[a-z][a-z0-9-]{0,31}$/.test(name)) throw new Error(`Invalid profile name: ${name}`);
     if (value === null) {
-      if (name !== 'default') throw new Error(`Profile ${name} must be an absolute config directory.`);
-      loaded.set(name, null);
+      if (name !== 'default') throw new Error(`Profile ${name} must be an absolute config directory or an object with base_url.`);
+      loaded.set(name, { configDir: null, baseUrl: null });
       continue;
     }
-    if (typeof value !== 'string' || !isAbsolute(value)) throw new Error(`Profile ${name} must be an absolute config directory.`);
-    const configDir = resolve(value);
-    if (!statSync(configDir, { throwIfNoEntry: false })?.isDirectory()) {
-      throw new Error(`Profile ${name} config directory does not exist: ${configDir}`);
+    if (typeof value === 'string') {
+      loaded.set(name, { configDir: configDirectory(name, value), baseUrl: null });
+      continue;
     }
-    loaded.set(name, configDir);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`Profile ${name} must be an absolute config directory or an object with base_url.`);
+    }
+    const unknown = Object.keys(value).filter(key => !['base_url', 'config_dir'].includes(key));
+    if (unknown.length) throw new Error(`Profile ${name} has unsupported fields: ${unknown.join(', ')}.`);
+    // Claude Code sends the profile's login token to this URL, so it must stay on this machine.
+    if (typeof value.base_url !== 'string' || !/^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d{1,5}(?:\/\S*)?$/.test(value.base_url)) {
+      throw new Error(`Profile ${name} base_url must be http://127.0.0.1, localhost or [::1] with a port.`);
+    }
+    loaded.set(name, { configDir: value.config_dir === undefined ? null : configDirectory(name, value.config_dir), baseUrl: value.base_url });
   }
   return loaded;
 }
 const profiles = loadProfiles();
 function profileEnv(name) {
-  const configDir = profiles.get(name);
-  return configDir ? { CLAUDE_CONFIG_DIR: configDir } : {};
+  const { configDir, baseUrl } = profiles.get(name);
+  return { ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}), ...(baseUrl ? { ANTHROPIC_BASE_URL: baseUrl } : {}) };
+}
+// Claude Code retries a refused connection for about three minutes, so a proxy profile checks that its proxy listens
+// before each call, as `teamclaude run` does.
+function checkProxy(name) {
+  const { baseUrl } = profiles.get(name);
+  if (!baseUrl) return;
+  const { hostname, port } = new URL(baseUrl);
+  return new Promise((resolve, reject) => {
+    const socket = connect({ host: hostname.replace(/^\[|\]$/g, ''), port: Number(port || 80) });
+    const done = problem => {
+      socket.destroy();
+      if (problem) reject(fail(502, `Profile ${name} calls through ${baseUrl}, which does not answer (${problem}). Start the proxy.`));
+      else resolve();
+    };
+    socket.setTimeout(2000);
+    socket.once('connect', () => done());
+    socket.once('timeout', () => done('timed out'));
+    socket.once('error', error => done(error.code ?? error.message));
+  });
 }
 // The login Claude Code uses for a profile. It writes .claude.json atomically, so a read never sees half a file.
 function accountEmail(name) {
-  const configPath = join(profiles.get(name) ?? homedir(), '.claude.json');
+  const configPath = join(profiles.get(name).configDir ?? homedir(), '.claude.json');
   let email;
   try { email = JSON.parse(readFileSync(configPath, 'utf8')).oauthAccount?.emailAddress; }
   catch (error) { throw fail(502, `Cannot read the login of profile ${name}: ${error.message}`); }
@@ -232,7 +270,7 @@ function selectedProfile(distinct) {
 }
 // Calls without x-local-profile may use any profile, so each must have a subscription login before the server starts.
 async function checkLogin(name) {
-  const configDir = profiles.get(name);
+  const { configDir } = profiles.get(name);
   let stdout;
   try {
     ({ stdout } = await promisify(execFile)(claude, ['--setting-sources', '', 'auth', 'status'], { ...options, env: { ...env, ...profileEnv(name) }, timeout: 30_000 }));
@@ -283,7 +321,10 @@ async function onProfile(requested, model, response, run) {
     if (requested) checkQuota(requested, model);
     if (quota.current !== previous) console.error(`${new Date().toISOString()} calls without x-local-profile moved from ${previous} to ${quota.current}`);
     if (!response.headersSent) response.setHeader('x-local-profile', profile);
-    try { return await run(profile, accountEmail(profile)); }
+    try {
+      await checkProxy(profile);
+      return await run(profile, accountEmail(profile));
+    }
     catch (error) {
       const until = error.status === 429 ? quota.spentUntil(profile, model) : 0;
       if (!until) throw error;
@@ -339,7 +380,7 @@ async function messagesRequest(input, response, signal, requestID, profile, logi
     prepared.cleanup();
     if (prepared.sessionId) {
       try {
-        const context = sessionContext(prepared.sessionId, profiles.get(profile));
+        const context = sessionContext(prepared.sessionId, profiles.get(profile).configDir);
         // A login switched during the call may have announced the other account.
         if (context && accountEmail(profile) === login) announced.set(profile, { login, context });
       }

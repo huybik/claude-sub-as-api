@@ -47,7 +47,8 @@ It keeps your usage low by caching what you mark, as the API does.
 - **Messages API features:** streaming, tool use, images, structured output, effort levels, and adaptive thinking.
 - **Models:** Sonnet 5.5, Opus 5.5, and Haiku 5.5.
 - **Prompt caching** with `cache_control`. Shared prefixes, follow-ups, and tool turns read about 97% from the cache.
-- **Several subscriptions:** calls stay on one [profile](#profiles) until its limit is reached, then move to the next.
+- **Several subscriptions:** calls stay on one [profile](#profiles) until its limit is reached, then move to the next. A profile can also go
+  through [TeamClaude](#profiles)'s account pool.
 - **Concurrency:** one concurrent call per GiB of RAM (48 on a 48 GB Mac), the rest wait; plus a local response cache
   and a usage counter.
 - **Service:** runs as a macOS LaunchAgent or a Linux systemd unit, bound to `127.0.0.1` behind a local key.
@@ -116,6 +117,19 @@ reply = client.messages.create(
     extra_headers={"x-local-profile": "claude-p"},
 )
 ```
+
+**Through TeamClaude.** A profile can send its calls through [TeamClaude](https://github.com/KarpelesLab/teamclaude),
+as `teamclaude run --no-mitm` does. TeamClaude then picks the account from its own pool and rotates it.
+`teamclaude env --no-mitm` prints the URL:
+
+```json
+{
+  "default": null,
+  "teamclaude": {"base_url": "http://localhost:3456"}
+}
+```
+
+Claude Code still needs its own login: `~/.claude`, or the profile's `config_dir`. See the [reference](docs/reference.md#profiles).
 
 ## Good to know (local mode)
 
