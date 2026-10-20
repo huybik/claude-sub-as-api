@@ -105,8 +105,8 @@ curl --fail-with-body http://127.0.0.1:8787/v1/generate \
 
 - **Response:** JSON with `model`, `text`, `usage`, `stop_reason`, `duration_ms`, and `session_id` (`null` for
   independent requests).
-- **Streaming:** a stream succeeds only when it emits `result`. Failures after the stream starts arrive as an `error`
-  event.
+- **Streaming:** a stream succeeds only when it emits `result`. The stream starts when the model's message starts, so a
+  failure before it is an HTTP error; failures after it arrive as an `error` event.
 - **Size:** at most 1 MiB per request.
 - **Saved sessions:**
   - They survive restarts. Claude Code stores them under `~/.claude/projects`.
@@ -116,8 +116,8 @@ curl --fail-with-body http://127.0.0.1:8787/v1/generate \
 
 | Endpoint | Returns |
 | --- | --- |
-| `GET /v1/health` | `status`, `active`, `queued`, `max_concurrency`, uptime, and features. Checks the local service only, not upstream quota. |
-| `GET /v1/usage` | Totals since startup: processes, model calls, failed processes, input/output and cache tokens, local reuse counters. |
+| `GET /v1/health` | `status`, `active`, `queued`, `max_concurrency`, uptime, features, and `quota`: the current profile, and for each profile the last `rate_limit_info` Claude Code reported with when its spent scopes reset. It makes no upstream call. |
+| `GET /v1/usage` | Totals since startup: processes, model calls, failed processes, input/output and cache tokens (also per profile under `profiles`), local reuse counters. |
 | `GET /v1/models` | The three model IDs in a custom `models` array (not the SDK's model-list shape). |
 
 `failed_processes` counts failed or cancelled processes. A client that closes the stream after the answer ends does
@@ -135,7 +135,7 @@ Errors on `/v1/messages` use the Anthropic error shape: `{"type":"error","error"
 | 404 | Unknown endpoint or saved session. |
 | 413 | Request body over 32 MiB (`/v1/messages`) or 1 MiB (`/v1/generate`). |
 | 415 | Content type is not `application/json`. |
-| 429 | Your subscription's rate or usage limit was reached upstream. |
+| 429 | Every profile the call may use is out of quota, or upstream refused it with another rate limit. `retry-after` gives the seconds until a known reset. |
 | 502 | Claude Code failed or returned something unexpected. Upstream request errors also arrive as 502. |
 | 503 | The service is stopping, or cloud mode is not configured. |
 | 504 | The call ran past the twenty-minute limit. |
@@ -232,15 +232,32 @@ client.messages.create(..., extra_headers={"x-local-cache": "false", "x-local-co
 
 ### Profiles
 
-`profiles.json`, next to `server.mjs`, maps a name to a Claude Code config directory. The server creates it on first start with `{"default": null}` and mode 0600. `default` leaves `CLAUDE_CONFIG_DIR` unset so Claude uses `~/.claude`. Any other value is an absolute directory. The file stays on the machine: a redeploy keeps it, like `token` and `sessions.json`. Callers send the name in `x-local-profile`; the response repeats it. An unknown name returns HTTP 400. The omitted header means `default`.
+`profiles.json`, next to `server.mjs`, maps a name to a Claude Code config directory. The server creates it on first start with `{"default": null}` and mode 0600. `default` leaves `CLAUDE_CONFIG_DIR` unset so Claude uses `~/.claude`. Any other value is an absolute directory. The file stays on the machine: a redeploy keeps it, like `token` and `sessions.json`. An unknown name in `x-local-profile` returns HTTP 400. The response's `x-local-profile` names the profile that served the call. A response reused from the local cache or shared with an identical call names none unless the request named one.
 
 ```python
 client.messages.create(..., extra_headers={"x-local-profile": "claude-p"})
 ```
 
-The server checks a non-default profile's `claude auth status` on first use and keeps that result until restart. Safe mode still ignores that profile's settings, MCP servers, and `CLAUDE.md`. The profile chooses which subscription is billed. Each profile keeps its own account-context announcement, so follow-up transcripts match that login. A saved `/v1/generate` session resumes only on the profile that created it. Sessions saved before profiles existed resume on `default`.
+The server checks every profile's `claude auth status` at startup and does not start while one is not logged in with a subscription. Safe mode still ignores that profile's settings, MCP servers, and `CLAUDE.md`. The profile chooses which subscription is billed. Each profile keeps its own account-context announcement, so follow-up transcripts match that login. A saved `/v1/generate` session resumes only on the profile that created it, with or without the header. Sessions saved before profiles existed resume on `default`.
 
 Restart the service after editing `profiles.json`.
+
+**Quota.** Each Claude Code process reports its subscription's limits in a `rate_limit_event`. The server keeps each
+profile's last report, keyed by that profile's login, so a `/login` to another account starts over.
+
+- **A profile is out of quota** when a call is refused (`status: "rejected"` without extra usage). It stays out until
+  the reported reset time, even if a call admitted earlier reports success afterwards. A weekly cap on one model family
+  (`seven_day_opus`, `seven_day_sonnet`) blocks only that family on that profile.
+- **Calls without `x-local-profile`** use the current profile, which starts as the first in `profiles.json`. When the
+  current profile is out of quota, it moves to the first profile in file order that has quota left. Staying on one
+  profile keeps prompt caches warm, since a cache belongs to one account. A profile last seen running on paid extra usage
+  is used only when no other profile has plan quota, until its plan window resets. A profile whose login can't be read
+  is skipped. A call refused before its stream started is retried on the next profile; one refused after it started
+  returns the error. Each move writes one line to the service log.
+- **Calls that name a profile** never move. While that profile is out of quota, they return HTTP 429 with
+  `retry-after` at once, without waiting for a slot or starting a process. So do rotating calls when every profile is out.
+- **Recovery.** If you raise a spend limit or log a spent profile in again before its reset, restart the service. A
+  profile whose token was revoked still looks usable, so its calls fail with HTTP 502 until you log it in again.
 
 Set the variables above in the LaunchAgent's `EnvironmentVariables` or the systemd unit, then reload the service.
 
@@ -303,7 +320,7 @@ Unsupported input fails explicitly; it is never silently converted to different 
 | --- | --- |
 | Service won't start; log says "Run claude auth login…" | Run `claude auth login`, choose your subscription, then restart the service. |
 | `401 Invalid local API token` | Read the key from `~/.local/share/claude-local-api/token`; don't use an Anthropic API key. |
-| `429` errors | Your subscription's usage limit was reached. Wait for the reset; the server never falls back to a paid API. |
+| `429` errors | The profiles the call may use are out of quota; `/v1/health` shows when each resets. Add a profile, wait for the reset, or restart after raising a limit. The server never falls back to a paid API. |
 | Cache reads stay at 0 | Mark a block with `cache_control`, or set top-level `cache_control`. |
 | Port 8787 in use | Stop the other process, or set `CLAUDE_LOCAL_API_PORT`. |
 
@@ -315,6 +332,7 @@ Unsupported input fails explicitly; it is never silently converted to different 
 | `anthropic.mjs` | Messages validation, history transcripts, and response translation. |
 | `queue.mjs` | Concurrency limit, waiting requests, and saved-session order. |
 | `reuse.mjs` | Local response cache and shared in-flight calls. |
+| `quota.mjs` | Each profile's reported quota, and the profile a call without `x-local-profile` uses. |
 | `cloud.mjs` | Cloud validation, OAuth access, session lifecycle, replies, and buffered SSE. |
 | `deploy/` | Launcher script and LaunchAgent template. |
 | [`DEPLOY.md`](../DEPLOY.md) | Install steps, written for Claude Code to follow. |
@@ -324,6 +342,7 @@ Unsupported input fails explicitly; it is never silently converted to different 
 Installed files: `~/.local/share/claude-local-api/` (code, `token`, `sessions.json`, `server.log`),
 `~/.local/bin/claude-local-api`, and `~/Library/LaunchAgents/local.claude-api.plist`.
 
+Profile rotation reads the `rate_limit_event` order checked on Claude Code 2.1.304.
 Validated with Claude Code 2.1.296 and the Anthropic Python SDK 1.11.0: JSON, SSE, tools, structured output, prompt
 caching, local reuse, cancellation, and timeouts. [CONTEXT.md](../CONTEXT.md) records the checks.
 
