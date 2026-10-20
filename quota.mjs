@@ -5,8 +5,10 @@
 // Weekly caps that cover one model family. Any other rejection spends the whole profile.
 const familyLimits = { seven_day_opus: 'opus', seven_day_sonnet: 'sonnet' };
 const family = model => ['opus', 'sonnet'].find(name => model.includes(name)) ?? 'other';
+// How long a proxy profile's refusal without a reset time holds it.
+const proxyRefusalHold = 60_000;
 const spentUntil = (report, model, now) => {
-  const until = Math.max(report?.spent.all ?? 0, report?.spent[family(model)] ?? 0);
+  const until = Math.max(report?.spent.all ?? 0, report?.spent[family(model)] ?? 0, report?.refusedUntil ?? 0);
   return until > now ? until : 0;
 };
 // Paid extra usage lasts until the plan window that ran out resets.
@@ -15,9 +17,10 @@ const onExtraUsage = (report, now) => report?.info.isUsingOverage === true && re
 export class ProfileQuota {
   reports = new Map(); // `${profile}\n${login}` -> the newest call's rate_limit_info, and each spent scope's reset.
 
-  constructor(names, loginOf) {
+  constructor(names, loginOf, proxied) {
     this.names = names;
     this.loginOf = loginOf;
+    this.proxied = proxied;
     this.current = names[0];
   }
 
@@ -26,14 +29,20 @@ export class ProfileQuota {
     const key = `${profile}\n${login}`;
     const report = this.reports.get(key) ?? { spent: {}, started: -Infinity };
     // Claude Code's own rule: rejected without extra usage refuses calls until resetsAt (seconds). A call admitted
-    // before the limit can still report allowed afterwards, so only the reset ends a spent scope. A refusal without a
-    // reset time, such as TeamClaude's own 429 once its pool is spent, holds for a minute.
-    if (info.status === 'rejected' && !info.isUsingOverage) {
+    // before the limit can still report allowed afterwards, so only the reset ends a spent scope.
+    const rejected = info.status === 'rejected' && !info.isUsingOverage;
+    if (rejected && info.resetsAt) {
       const scope = familyLimits[info.rateLimitType] ?? 'all';
-      report.spent[scope] = Math.max(report.spent[scope] ?? 0, info.resetsAt ? info.resetsAt * 1000 : Date.now() + 60_000);
+      report.spent[scope] = Math.max(report.spent[scope] ?? 0, info.resetsAt * 1000);
     }
-    // The newest call's report wins, so an older one can't undo a move to extra usage.
-    if (started >= report.started) Object.assign(report, { info, started });
+    // The newest call's report wins, so an older one can't undo a move to extra usage. Claude Code reports any 429
+    // without the reset header as rejected with no resetsAt. From Anthropic that is about the request, not the account.
+    // A proxy sends it too: TeamClaude's 429 once its pool is spent carries only retry-after, which Claude Code doesn't
+    // pass on. So a proxy profile is held for a minute, until a newer call reports otherwise.
+    if (started >= report.started) {
+      const refused = rejected && !info.resetsAt && this.proxied(profile);
+      Object.assign(report, { info, started, refusedUntil: refused ? Date.now() + proxyRefusalHold : 0 });
+    }
     this.reports.set(key, report);
   }
 
@@ -84,7 +93,7 @@ export class ProfileQuota {
       let report;
       try { report = this.report(name); } catch (error) { return [name, { error: error.message }]; }
       if (!report) return [name, null];
-      const spent = Object.entries(report.spent).filter(([, until]) => until > now);
+      const spent = Object.entries({ ...report.spent, proxy_refusal: report.refusedUntil }).filter(([, until]) => until > now);
       return [name, { call_started_at: time(report.started), rate_limit_info: report.info, on_extra_usage: onExtraUsage(report, now),
         spent_until: Object.fromEntries(spent.map(([scope, until]) => [scope, time(until)])) }];
     })) };

@@ -48,7 +48,7 @@ It keeps your usage low by caching what you mark, as the API does.
 - **Models:** Sonnet 5.5, Opus 5.5, and Haiku 5.5.
 - **Prompt caching** with `cache_control`. Shared prefixes, follow-ups, and tool turns read about 97% from the cache.
 - **Several subscriptions:** calls stay on one [profile](#profiles) until its limit is reached, then move to the next. A profile can also go
-  through [TeamClaude](#profiles)'s account pool.
+  through [TeamClaude](https://github.com/KarpelesLab/teamclaude)'s account pool.
 - **Concurrency:** one concurrent call per GiB of RAM (48 on a 48 GB Mac), the rest wait; plus a local response cache
   and a usage counter.
 - **Service:** runs as a macOS LaunchAgent or a Linux systemd unit, bound to `127.0.0.1` behind a local key.
@@ -129,7 +129,8 @@ as `teamclaude run --no-mitm` does. TeamClaude then picks the account from its o
 }
 ```
 
-Claude Code still needs its own login: `~/.claude`, or the profile's `config_dir`. See the [reference](docs/reference.md#profiles).
+Claude Code still needs its own login: `~/.claude`, or the profile's `config_dir`. TeamClaude's config decides which
+accounts and models serve these calls, API keys included. See the [reference](docs/reference.md#profiles).
 
 ## Good to know (local mode)
 
@@ -145,7 +146,8 @@ Claude Code still needs its own login: `~/.claude`, or the profile's `config_dir
   - cache breakpoints on `system` or `tools`, more than four breakpoints, or `1h` after `5m`,
   - a cache breakpoint on an image of the final user message with no text block before it: Claude Code drops an
     image's breakpoint, so it moves to the nearest earlier text block.
-- **Limits.** HTTP 429 once every profile the call may use is out of quota. The server never falls back to a paid API.
+- **Limits.** HTTP 429 once every profile the call may use is out of quota. The server never falls back to a paid API;
+  a TeamClaude profile bills whatever TeamClaude's pool holds.
   `/v1/health` shows each profile's last reported quota.
 
 ## Docs

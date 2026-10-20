@@ -135,7 +135,7 @@ Errors on `/v1/messages` use the Anthropic error shape: `{"type":"error","error"
 | 404 | Unknown endpoint or saved session. |
 | 413 | Request body over 32 MiB (`/v1/messages`) or 1 MiB (`/v1/generate`). |
 | 415 | Content type is not `application/json`. |
-| 429 | Every profile the call may use is out of quota, or upstream refused it with another rate limit. `retry-after` gives the seconds until a known reset. |
+| 429 | Every profile the call may use is out of quota, or upstream refused it with another rate limit. `retry-after` gives the seconds until a known reset, or until a proxy profile's one-minute hold ends. |
 | 502 | Claude Code failed or returned something unexpected. Upstream request errors, and a proxy profile's proxy being down, also arrive as 502. |
 | 503 | The service is stopping, or cloud mode is not configured. |
 | 504 | The call ran past the twenty-minute limit. |
@@ -248,11 +248,18 @@ The server checks every profile's `claude auth status` at startup and does not s
   since Claude Code sends the profile's login token to it. A path is kept, so TeamClaude's `/tc-acct/<account>` pin works.
 - `config_dir` is optional; without it Claude Code uses `~/.claude`. Claude Code checks that login before it sends
   anything, and TeamClaude swaps in a token from its own pool.
-- Claude Code's own retries are off (`CLAUDE_CODE_MAX_RETRIES=0`), since the proxy retries upstream. So a call fails
-  within about two seconds while the proxy is down (HTTP 502), and it doesn't move to another profile.
-- Quota reports describe whichever account the proxy used. TeamClaude refuses a call once its whole pool is spent,
-  with a 429 that has no reset time, and the profile then counts as out of quota for one minute.
-- Leave TeamClaude's `holdSeconds` off: Claude Code gives up on a request after ten minutes.
+- Claude Code retries once instead of ten times (`CLAUDE_CODE_MAX_RETRIES=1`). That one retry is the second try
+  TeamClaude leaves to the client after an overloaded upstream. While the proxy is down, a call fails within about two
+  seconds with HTTP 502 and does not move to another profile.
+- Quota reports describe whichever account the proxy used. Once its whole pool is spent, TeamClaude answers 429 with
+  only `retry-after`, which Claude Code does not pass on. The profile then counts as out of quota for one minute, unless
+  a call that started later succeeds. A direct profile's 429 without a reset time concerns the request and holds nothing.
+- TeamClaude's config decides which accounts and models serve these calls. It can pool API keys and other backends, so
+  the server's no-paid-API rule then depends on it. A model other than the requested one still fails with HTTP 502.
+- Leave TeamClaude's `holdSeconds` off. A held call never gets the pool-spent 429, so it can't move to another
+  profile, and Claude Code gives up on it after ten minutes.
+- Start the server from a shell that has not run `eval "$(teamclaude env)"`. Its default MITM mode exports proxy
+  variables that every profile would inherit.
 
 Restart the service after editing `profiles.json`.
 
@@ -260,9 +267,9 @@ Restart the service after editing `profiles.json`.
 profile's last report, keyed by that profile's login, so a `/login` to another account starts over.
 
 - **A profile is out of quota** when a call is refused (`status: "rejected"` without extra usage). It stays out until
-  the reported reset time, or for one minute when the refusal reports none, even if a call admitted earlier reports
-  success afterwards. A weekly cap on one model family
-  (`seven_day_opus`, `seven_day_sonnet`) blocks only that family on that profile.
+  the reported reset time, even if a call admitted earlier reports success afterwards. A weekly cap on one model family
+  (`seven_day_opus`, `seven_day_sonnet`) blocks only that family on that profile. A proxy profile's refusal without a
+  reset time holds it for one minute (above).
 - **Calls without `x-local-profile`** use the current profile, which starts as the first in `profiles.json`. When the
   current profile is out of quota, it moves to the first profile in file order that has quota left. Staying on one
   profile keeps prompt caches warm, since a cache belongs to one account. A profile last seen running on paid extra usage
