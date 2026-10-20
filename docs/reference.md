@@ -105,8 +105,8 @@ curl --fail-with-body http://127.0.0.1:8787/v1/generate \
 
 - **Response:** JSON with `model`, `text`, `usage`, `stop_reason`, `duration_ms`, and `session_id` (`null` for
   independent requests).
-- **Streaming:** a stream succeeds only when it emits `result`. The stream starts with the first output, so a failure
-  before it is an HTTP error; failures after it arrive as an `error` event.
+- **Streaming:** a stream succeeds only when it emits `result`. The stream starts when the model's message starts, so a
+  failure before it is an HTTP error; failures after it arrive as an `error` event.
 - **Size:** at most 1 MiB per request.
 - **Saved sessions:**
   - They survive restarts. Claude Code stores them under `~/.claude/projects`.
@@ -256,7 +256,8 @@ profile's last report, keyed by that profile's login, so a `/login` to another a
   returns the error. Each move writes one line to the service log.
 - **Calls that name a profile** never move. While that profile is out of quota, they return HTTP 429 with
   `retry-after` at once, without waiting for a slot or starting a process. So do rotating calls when every profile is out.
-- **Recovery.** If you raise a spend limit or log a spent profile in again before its reset, restart the service.
+- **Recovery.** If you raise a spend limit or log a spent profile in again before its reset, restart the service. A
+  profile whose token was revoked still looks usable, so its calls fail with HTTP 502 until you log it in again.
 
 Set the variables above in the LaunchAgent's `EnvironmentVariables` or the systemd unit, then reload the service.
 

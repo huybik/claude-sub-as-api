@@ -21,8 +21,8 @@ export class ProfileQuota {
     this.current = names[0];
   }
 
-  // rate_limit_info from a call that started at `started` on this profile, login and model.
-  record(profile, login, model, info, started) {
+  // rate_limit_info from a call that started at `started` on this profile and login.
+  record(profile, login, info, started) {
     const key = `${profile}\n${login}`;
     const report = this.reports.get(key) ?? { spent: {}, started: -Infinity };
     // Claude Code's own rule: rejected without extra usage refuses calls until resetsAt (seconds). A call admitted

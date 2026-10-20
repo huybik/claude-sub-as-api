@@ -69,7 +69,7 @@ function event(response, name, data) {
 function runClaude(args, prompt, signal, onText, bridge = {}) {
   signal.throwIfAborted();
   usage.claude_processes++;
-  const model = args[args.indexOf('--model') + 1], started = Date.now();
+  const started = Date.now();
   return new Promise((resolve, reject) => {
     let pending = '', stderr = '';
     let result, messageUsage;
@@ -99,12 +99,12 @@ function runClaude(args, prompt, signal, onText, bridge = {}) {
         const message = JSON.parse(line);
         if (message.type === 'stream_event' && !message.parent_tool_use_id) {
           const event = message.event;
-          if (event?.type === 'message_start') { usage.model_calls++; messageUsage = { ...event.message.usage }; }
+          if (event?.type === 'message_start') { usage.model_calls++; messageUsage = { ...event.message.usage }; bridge.onStart?.(); }
           if (event?.type === 'message_delta' && messageUsage) Object.assign(messageUsage, event.usage);
           if (event?.type === 'message_stop' && messageUsage) { addTokens(streamUsage, messageUsage); messageUsage = undefined; }
         }
         if (message.type === 'rate_limit_event') {
-          quota.record(bridge.profile, bridge.login, model, message.rate_limit_info, started);
+          quota.record(bridge.profile, bridge.login, message.rate_limit_info, started);
           if (bridge.capture?.complete) stop();
         }
         if (message.type === 'control_response' && message.response.request_id === 'local-init') {
@@ -241,7 +241,8 @@ async function checkLogin(name) {
     if (!error.stdout) throw error;
     stdout = error.stdout;
   }
-  const auth = JSON.parse(stdout);
+  let auth;
+  try { auth = JSON.parse(stdout); } catch { throw new Error(`Profile ${name} returned an unreadable auth status: ${stdout.slice(0, 200)}`); }
   if (!auth.loggedIn || auth.authMethod !== 'claude.ai' || auth.apiProvider !== 'firstParty') {
     throw new Error(`Run ${configDir ? `CLAUDE_CONFIG_DIR=${configDir} ` : ''}claude auth login and select your Claude subscription first (profile ${name}).`);
   }
@@ -255,12 +256,18 @@ function outOfQuota(profile, until) {
   error.retryAfter = secondsUntil(until);
   return error;
 }
+// No profile can take the call: a login that can't be read explains that better than quota does.
+function noProfile(model) {
+  const until = quota.nextReset(model);
+  if (!Number.isFinite(until)) for (const name of quota.names) accountEmail(name);
+  return outOfQuota(null, until);
+}
 // Throws while the call can't run: its named profile, or every profile, is out of quota for the model.
 function checkQuota(requested, model) {
   if (requested) {
     const until = quota.spentUntil(requested, model);
     if (until) throw outOfQuota(requested, until);
-  } else if (!quota.usable(model).length) throw outOfQuota(null, quota.nextReset(model));
+  } else if (!quota.usable(model).length) throw noProfile(model);
 }
 // A named profile never changes, and while it is spent its calls fail without starting a process. A call without
 // x-local-profile moves to the next profile when Claude Code reports this one spent, unless its stream has started.
@@ -271,7 +278,7 @@ async function onProfile(requested, model, response, run) {
     const profile = requested ?? quota.choose(model, tried);
     if (!profile) {
       if (!response.headersSent) response.removeHeader('x-local-profile');
-      throw outOfQuota(null, quota.nextReset(model));
+      throw noProfile(model);
     }
     if (requested) checkQuota(requested, model);
     if (quota.current !== previous) console.error(`${new Date().toISOString()} calls without x-local-profile moved from ${previous} to ${quota.current}`);
@@ -358,16 +365,15 @@ async function generateRequest(input, response, signal, profile, login) {
     }
     if (input.effort !== undefined) args.push('--effort', input.effort);
     if (input.json_schema !== undefined) args.push('--json-schema', JSON.stringify(input.json_schema));
-    // Start the stream on the first output, so a call refused before it can still move to another profile.
+    // Start the stream when the model's message starts: a refused call sends none, so it can still move.
     const begin = () => {
       if (!input.stream || response.headersSent) return;
       response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' });
       event(response, 'start', { model: input.model, session_id: sessionID });
     };
     const result = await runClaude(args, input.prompt, signal, text => {
-      begin();
       if (input.stream) event(response, 'delta', { text });
-    }, { profile, login });
+    }, { profile, login, onStart: begin });
     const usedModels = Object.keys(result.modelUsage ?? {});
     if (usedModels.length !== 1 || usedModels[0] !== input.model) {
       throw fail(502, `Claude reported an unexpected model: ${usedModels.join(', ')}.`);
