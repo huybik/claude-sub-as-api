@@ -193,7 +193,7 @@ function proxyUrl(name, value) {
   const url = typeof value === 'string' && URL.canParse(value) ? new URL(value) : null;
   if (url?.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) || !(Number(url.port) >= 1)
     || url.username || url.password || url.search || url.hash) {
-    throw new Error(`Profile ${name} base_url must be http://127.0.0.1, localhost or [::1] with a port and no query.`);
+    throw new Error(`Profile ${name} base_url must be http://127.0.0.1, localhost or [::1] with a port, and no userinfo, query or fragment.`);
   }
   return url.origin + url.pathname.replace(/\/$/, '');
 }
@@ -314,8 +314,9 @@ async function onProfile(requested, model, response, run) {
     try { return await run(profile, accountEmail(profile)); }
     catch (error) {
       const until = error.status === 429 ? quota.spentUntil(profile, model) : 0;
-      if (!until) throw error;
-      if (requested || response.headersSent) throw Object.assign(error, { retryAfter: secondsUntil(until) });
+      // A proxy profile's 429 moves the call even when a newer call's success kept the profile usable.
+      if (!until && !(error.status === 429 && profiles.get(profile).proxied)) throw error;
+      if (requested || response.headersSent) throw Object.assign(error, until ? { retryAfter: secondsUntil(until) } : {});
       tried.add(profile);
     }
   }

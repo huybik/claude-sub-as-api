@@ -251,13 +251,16 @@ The server checks every profile's `claude auth status` at startup and does not s
 - Claude Code retries once instead of ten times (`CLAUDE_CODE_MAX_RETRIES=1`). That one retry is the second try
   TeamClaude leaves to the client after an overloaded upstream. While the proxy is down, a call fails within about two
   seconds with HTTP 502 and does not move to another profile.
-- Quota reports describe whichever account the proxy used. Once its whole pool is spent, TeamClaude answers 429 with
-  only `retry-after`, which Claude Code does not pass on. The profile then counts as out of quota for one minute, unless
-  a call that started later succeeds. A direct profile's 429 without a reset time concerns the request and holds nothing.
+- Quota reports describe whichever account the proxy used, so one pool account on paid extra usage marks the whole
+  profile as on extra usage. Once its whole pool is spent, TeamClaude answers 429 with only `retry-after`, which Claude
+  Code does not pass on. Any 429 without a reset time from the proxy, including its pinned-account and request-scoped
+  ones, holds the profile for one minute for every model, unless a call that started later succeeds. A call without
+  `x-local-profile` moves on after any 429 from the proxy. A direct profile's 429 without a reset time concerns the
+  request and holds nothing.
 - TeamClaude's config decides which accounts and models serve these calls. It can pool API keys and other backends, so
   the server's no-paid-API rule then depends on it. A model other than the requested one still fails with HTTP 502.
-- Leave TeamClaude's `holdSeconds` off. A held call never gets the pool-spent 429, so it can't move to another
-  profile, and Claude Code gives up on it after ten minutes.
+- Leave TeamClaude's `holdSeconds` off. A held call waits up to `holdSeconds` before it gets the 429 and can move.
+  Past ten minutes, Claude Code times out, retries once, and the call ends at the twenty-minute limit (HTTP 504).
 - Start the server from a shell that has not run `eval "$(teamclaude env)"`. Its default MITM mode exports proxy
   variables that every profile would inherit.
 
