@@ -105,8 +105,8 @@ curl --fail-with-body http://127.0.0.1:8787/v1/generate \
 
 - **Response:** JSON with `model`, `text`, `usage`, `stop_reason`, `duration_ms`, and `session_id` (`null` for
   independent requests).
-- **Streaming:** a stream succeeds only when it emits `result`. Failures after the stream starts arrive as an `error`
-  event.
+- **Streaming:** a stream succeeds only when it emits `result`. The stream starts with the first output, so a failure
+  before it is an HTTP error; failures after it arrive as an `error` event.
 - **Size:** at most 1 MiB per request.
 - **Saved sessions:**
   - They survive restarts. Claude Code stores them under `~/.claude/projects`.
@@ -238,7 +238,7 @@ client.messages.create(..., extra_headers={"x-local-cache": "false", "x-local-co
 client.messages.create(..., extra_headers={"x-local-profile": "claude-p"})
 ```
 
-The server checks a non-default profile's `claude auth status` on first use and keeps that result until restart. Safe mode still ignores that profile's settings, MCP servers, and `CLAUDE.md`. The profile chooses which subscription is billed. Each profile keeps its own account-context announcement, so follow-up transcripts match that login. A saved `/v1/generate` session resumes only on the profile that created it, with or without the header. Sessions saved before profiles existed resume on `default`.
+The server checks every profile's `claude auth status` at startup and does not start while one is not logged in with a subscription. Safe mode still ignores that profile's settings, MCP servers, and `CLAUDE.md`. The profile chooses which subscription is billed. Each profile keeps its own account-context announcement, so follow-up transcripts match that login. A saved `/v1/generate` session resumes only on the profile that created it, with or without the header. Sessions saved before profiles existed resume on `default`.
 
 Restart the service after editing `profiles.json`.
 
@@ -246,14 +246,16 @@ Restart the service after editing `profiles.json`.
 profile's last report, keyed by that profile's login, so a `/login` to another account starts over.
 
 - **A profile is out of quota** when a call is refused (`status: "rejected"` without extra usage). It stays out until
-  the reported reset time. A weekly cap on one model family (`seven_day_opus`, `seven_day_sonnet`) blocks only that family.
+  the reported reset time, even if a call admitted earlier reports success afterwards. A weekly cap on one model family
+  (`seven_day_opus`, `seven_day_sonnet`) blocks only that family on that profile.
 - **Calls without `x-local-profile`** use the current profile, which starts as the first in `profiles.json`. When the
   current profile is out of quota, it moves to the first profile in file order that has quota left. Staying on one
   profile keeps prompt caches warm, since a cache belongs to one account. A profile last seen running on paid extra usage
-  is used only when no other profile has plan quota. A call refused before its stream started is retried on the next
-  profile; one refused after it started returns the error. Each move writes one line to the service log.
+  is used only when no other profile has plan quota, until its plan window resets. A profile whose login can't be read
+  is skipped. A call refused before its stream started is retried on the next profile; one refused after it started
+  returns the error. Each move writes one line to the service log.
 - **Calls that name a profile** never move. While that profile is out of quota, they return HTTP 429 with
-  `retry-after` without starting a process.
+  `retry-after` at once, without waiting for a slot or starting a process. So do rotating calls when every profile is out.
 - **Recovery.** If you raise a spend limit or log a spent profile in again before its reset, restart the service.
 
 Set the variables above in the LaunchAgent's `EnvironmentVariables` or the systemd unit, then reload the service.
@@ -339,6 +341,7 @@ Unsupported input fails explicitly; it is never silently converted to different 
 Installed files: `~/.local/share/claude-local-api/` (code, `token`, `sessions.json`, `server.log`),
 `~/.local/bin/claude-local-api`, and `~/Library/LaunchAgents/local.claude-api.plist`.
 
+Profile rotation reads the `rate_limit_event` order checked on Claude Code 2.1.304.
 Validated with Claude Code 2.1.296 and the Anthropic Python SDK 1.11.0: JSON, SSE, tools, structured output, prompt
 caching, local reuse, cancellation, and timeouts. [CONTEXT.md](../CONTEXT.md) records the checks.
 

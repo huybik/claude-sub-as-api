@@ -5,9 +5,15 @@
 // Weekly caps that cover one model family. Any other rejection spends the whole profile.
 const familyLimits = { seven_day_opus: 'opus', seven_day_sonnet: 'sonnet' };
 const family = model => ['opus', 'sonnet'].find(name => model.includes(name)) ?? 'other';
+const spentUntil = (report, model, now) => {
+  const until = Math.max(report?.spent.all ?? 0, report?.spent[family(model)] ?? 0);
+  return until > now ? until : 0;
+};
+// Paid extra usage lasts until the plan window that ran out resets.
+const onExtraUsage = (report, now) => report?.info.isUsingOverage === true && report.info.resetsAt * 1000 > now;
 
 export class ProfileQuota {
-  reports = new Map(); // Profile -> the login it ran on, its last rate_limit_info, and each spent scope's reset.
+  reports = new Map(); // `${profile}\n${login}` -> the newest call's rate_limit_info, and each spent scope's reset.
 
   constructor(names, loginOf) {
     this.names = names;
@@ -15,41 +21,49 @@ export class ProfileQuota {
     this.current = names[0];
   }
 
-  // rate_limit_info from a call that ran on this profile, login and model.
-  record(profile, login, model, info, now = Date.now()) {
-    let report = this.reports.get(profile);
-    if (report?.login !== login) report = { login, spent: {} };
-    Object.assign(report, { info, at: now });
-    // Claude Code's own rule: rejected without extra usage refuses calls until resetsAt (seconds).
-    if (info.status === 'rejected' && !info.isUsingOverage) report.spent[familyLimits[info.rateLimitType] ?? 'all'] = info.resetsAt * 1000;
-    else {
-      delete report.spent.all;
-      delete report.spent[family(model)];
+  // rate_limit_info from a call that started at `started` on this profile, login and model.
+  record(profile, login, model, info, started) {
+    const key = `${profile}\n${login}`;
+    const report = this.reports.get(key) ?? { spent: {}, started: -Infinity };
+    // Claude Code's own rule: rejected without extra usage refuses calls until resetsAt (seconds). A call admitted
+    // before the limit can still report allowed afterwards, so only the reset ends a spent scope.
+    if (info.status === 'rejected' && !info.isUsingOverage && info.resetsAt) {
+      const scope = familyLimits[info.rateLimitType] ?? 'all';
+      report.spent[scope] = Math.max(report.spent[scope] ?? 0, info.resetsAt * 1000);
     }
-    this.reports.set(profile, report);
+    // The newest call's report wins, so an older one can't undo a move to extra usage.
+    if (started >= report.started) Object.assign(report, { info, started });
+    this.reports.set(key, report);
   }
 
-  // The report for the profile's current login: a /login to another account starts over.
+  // The report for the profile's current login. Throws when the login can't be read.
   report(profile) {
-    const report = this.reports.get(profile);
-    if (!report) return;
-    try { return report.login === this.loginOf(profile) ? report : undefined; }
-    catch { return undefined; }
+    return this.reports.get(`${profile}\n${this.loginOf(profile)}`);
   }
 
   // When the profile can serve this model again; 0 when it can now.
   spentUntil(profile, model, now = Date.now()) {
-    const spent = this.report(profile)?.spent ?? {};
-    const until = Math.max(spent.all ?? 0, spent[family(model)] ?? 0);
-    return until > now ? until : 0;
+    return spentUntil(this.report(profile), model, now);
   }
 
-  // The current profile while it has plan quota, else the first in profiles.json order that has. A profile serving on
-  // paid extra usage is used only when none has plan quota. Undefined when every untried profile is spent.
+  // Profiles not in `tried` that can serve this model now, in profiles.json order. One without a readable login can't.
+  usable(model, tried = new Set(), now = Date.now()) {
+    const usable = [];
+    for (const name of this.names) {
+      if (tried.has(name)) continue;
+      let report;
+      try { report = this.report(name); } catch { continue; }
+      if (!spentUntil(report, model, now)) usable.push({ name, extraUsage: onExtraUsage(report, now) });
+    }
+    return usable;
+  }
+
+  // The current profile while it has plan quota, else the first in profiles.json order that has. A profile on paid
+  // extra usage is used only when none has plan quota. Undefined when no untried profile can serve the model.
   choose(model, tried, now = Date.now()) {
-    const usable = this.names.filter(name => !tried.has(name) && !this.spentUntil(name, model, now));
-    const plan = usable.filter(name => !this.report(name)?.info.isUsingOverage);
-    const pool = plan.length ? plan : usable;
+    const usable = this.usable(model, tried, now);
+    const plan = usable.filter(profile => !profile.extraUsage);
+    const pool = (plan.length ? plan : usable).map(profile => profile.name);
     const choice = pool.includes(this.current) ? this.current : pool[0];
     if (choice) this.current = choice;
     return choice;
@@ -57,16 +71,20 @@ export class ProfileQuota {
 
   // The earliest time a profile can serve this model again; Infinity when none reported a reset.
   nextReset(model, now = Date.now()) {
-    return Math.min(...this.names.map(name => this.spentUntil(name, model, now)).filter(Boolean));
+    const resets = this.names.map(name => {
+      try { return this.spentUntil(name, model, now); } catch { return 0; }
+    });
+    return Math.min(...resets.filter(Boolean));
   }
 
   status(now = Date.now()) {
     const time = ms => new Date(ms).toISOString();
     return { current: this.current, profiles: Object.fromEntries(this.names.map(name => {
-      const report = this.report(name);
+      let report;
+      try { report = this.report(name); } catch (error) { return [name, { error: error.message }]; }
       if (!report) return [name, null];
       const spent = Object.entries(report.spent).filter(([, until]) => until > now);
-      return [name, { reported_at: time(report.at), rate_limit_info: report.info,
+      return [name, { call_started_at: time(report.started), rate_limit_info: report.info, on_extra_usage: onExtraUsage(report, now),
         spent_until: Object.fromEntries(spent.map(([scope, until]) => [scope, time(until)])) }];
     })) };
   }

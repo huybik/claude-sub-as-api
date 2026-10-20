@@ -12,7 +12,7 @@ Install directory: `~/.local/share/claude-local-api` (call it `INSTALL_DIR`). Th
 - **Node.js 22 or newer.** Run `node --version`, then record the absolute path from `command -v node`.
   With nvm, use the real version path, such as `~/.nvm/versions/node/v22.x.y/bin/node`, not a shim.
 - **Claude Code on `PATH`.** The server runs `claude` through `PATH`. Record the directory from `command -v claude`.
-  Claude Code must support the `claude-*-5-5` models. Run `claude --version`; the server was validated on 2.1.296.
+  Claude Code must support the `claude-*-5-5` models. Run `claude --version`; the server was validated on 2.1.296, and profile rotation on 2.1.304.
 - **Subscription login.** Run `claude auth status`. It must report `loggedIn: true`, `authMethod: "claude.ai"`, and
   `apiProvider: "firstParty"`. If any value differs, ask the user to run `claude auth login` and select their subscription.
   The server refuses to start without this login. It does not use API keys.

@@ -33,11 +33,6 @@ for (const name of Object.keys(env)) {
   if (/^(ANTHROPIC_|CLAUDE_CODE_|CLAUDE_CONFIG_DIR$|CLAUDECODE$)/.test(name)) delete env[name];
 }
 const options = { cwd: directory, env, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 1_200_000 };
-const { stdout } = await promisify(execFile)(claude, ['--setting-sources', '', 'auth', 'status'], options);
-const auth = JSON.parse(stdout);
-if (!auth.loggedIn || auth.authMethod !== 'claude.ai' || auth.apiProvider !== 'firstParty') {
-  throw new Error('Run claude auth login and select your Claude subscription first.');
-}
 
 // One call per GiB of memory: a Claude Code process holds about 250 MB, so a full machine stays out of swap.
 const queue = new RequestQueue(Number(process.env.CLAUDE_LOCAL_API_CONCURRENCY ?? Math.max(1, Math.floor(totalmem() / 2 ** 30))));
@@ -74,7 +69,7 @@ function event(response, name, data) {
 function runClaude(args, prompt, signal, onText, bridge = {}) {
   signal.throwIfAborted();
   usage.claude_processes++;
-  const model = args[args.indexOf('--model') + 1];
+  const model = args[args.indexOf('--model') + 1], started = Date.now();
   return new Promise((resolve, reject) => {
     let pending = '', stderr = '';
     let result, messageUsage;
@@ -85,17 +80,17 @@ function runClaude(args, prompt, signal, onText, bridge = {}) {
     const control = 'userMessage' in bridge;
     const child = spawn(claude, args, { cwd: directory,
       env: { ...env, ...profileEnv(bridge.profile), ...bridge.env, ...(bridge.maxTokens ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(bridge.maxTokens) } : {}) } });
-    // Only the first stop decides the outcome: a client that disconnects after the
-    // captured message ends does not turn a delivered answer into a failure.
+    // Only the first stop decides the outcome, and nothing after the captured message ends (a client that
+    // disconnects, the timeout, a closed stdin) turns a delivered answer into a failure.
     function stop(error) {
       if (stopping || closed) return;
-      failure = error;
+      failure = bridge.capture?.complete ? undefined : error;
       stopping = true;
       clearTimeout(timeout);
       child.kill('SIGTERM');
       killTimer = setTimeout(() => child.kill('SIGKILL'), 1000);
     }
-    const cancel = () => stop(bridge.capture?.complete ? undefined : signal.reason ?? fail(503, 'The service is stopping.'));
+    const cancel = () => stop(signal.reason ?? fail(503, 'The service is stopping.'));
     const timeout = setTimeout(() => stop(fail(504, 'Claude exceeded the twenty-minute execution limit.')), options.timeout);
     const send = message => child.stdin.write(JSON.stringify(message) + '\n');
     function consume(line) {
@@ -109,7 +104,7 @@ function runClaude(args, prompt, signal, onText, bridge = {}) {
           if (event?.type === 'message_stop' && messageUsage) { addTokens(streamUsage, messageUsage); messageUsage = undefined; }
         }
         if (message.type === 'rate_limit_event') {
-          quota.record(bridge.profile, bridge.login, model, message.rate_limit_info);
+          quota.record(bridge.profile, bridge.login, model, message.rate_limit_info, started);
           if (bridge.capture?.complete) stop();
         }
         if (message.type === 'control_response' && message.response.request_id === 'local-init') {
@@ -196,7 +191,8 @@ function loadProfiles() {
   if (!Object.hasOwn(raw, 'default') || raw.default !== null) throw new Error('profiles.json default must be null.');
   const loaded = new Map();
   for (const [name, value] of Object.entries(raw)) {
-    if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(name)) throw new Error(`Invalid profile name: ${name}`);
+    // A leading letter keeps file order: JavaScript lists integer-like keys first.
+    if (!/^[a-z][a-z0-9-]{0,31}$/.test(name)) throw new Error(`Invalid profile name: ${name}`);
     if (value === null) {
       if (name !== 'default') throw new Error(`Profile ${name} must be an absolute config directory.`);
       loaded.set(name, null);
@@ -234,89 +230,57 @@ function selectedProfile(distinct) {
   if (!profiles.has(values[0])) throw fail(400, `x-local-profile must be one of: ${[...profiles.keys()].join(', ')}.`);
   return values[0];
 }
-const profileLogins = new Map();
-async function assertProfileLogin(name, signal) {
-  if (name === 'default') return;
-  signal.throwIfAborted();
-  let entry = profileLogins.get(name);
-  if (entry === true) return;
-  if (entry === undefined) {
-    const controller = new AbortController();
-    const stop = () => controller.abort();
-    activeCalls.add(stop);
-    entry = { stop, promise: null };
-    profileLogins.set(name, entry);
-    entry.promise = (async () => {
-      let stdout;
-      try {
-        ({ stdout } = await promisify(execFile)(claude, ['--setting-sources', '', 'auth', 'status'], {
-          cwd: directory, env: { ...env, ...profileEnv(name) }, encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024, signal: controller.signal,
-        }));
-      } catch (error) {
-        // A missing login exits non-zero and still prints JSON. Shutdown aborts the process.
-        if (controller.signal.aborted) throw fail(503, 'The service is stopping.');
-        if (typeof error.stdout === 'string' && error.stdout.trim()) stdout = error.stdout;
-        else throw fail(502, `Profile ${name} could not be checked. Log it in with its config directory, then retry.`);
-      } finally {
-        activeCalls.delete(stop);
-      }
-      let authStatus;
-      try { authStatus = JSON.parse(stdout); }
-      catch { throw fail(502, `Profile ${name} returned an unreadable auth status.`); }
-      if (!authStatus.loggedIn || authStatus.authMethod !== 'claude.ai' || authStatus.apiProvider !== 'firstParty') {
-        throw fail(502, `Profile ${name} is not logged in with a Claude subscription.`);
-      }
-    })();
-  }
-  entry.waiters = (entry.waiters ?? 0) + 1;
-  let left = false;
-  const onAbort = () => {
-    if (left) return;
-    left = true;
-    entry.waiters--;
-    if (entry.waiters === 0) entry.stop();
-  };
-  signal.addEventListener('abort', onAbort, { once: true });
+// Calls without x-local-profile may use any profile, so each must have a subscription login before the server starts.
+async function checkLogin(name) {
+  const configDir = profiles.get(name);
+  let stdout;
   try {
-    await entry.promise;
+    ({ stdout } = await promisify(execFile)(claude, ['--setting-sources', '', 'auth', 'status'], { ...options, env: { ...env, ...profileEnv(name) }, timeout: 30_000 }));
   } catch (error) {
-    if (profileLogins.get(name) === entry) profileLogins.delete(name);
-    throw error;
-  } finally {
-    signal.removeEventListener('abort', onAbort);
-    if (!left) {
-      left = true;
-      entry.waiters--;
-    }
+    // A missing login exits non-zero and still prints JSON.
+    if (!error.stdout) throw error;
+    stdout = error.stdout;
   }
-  if (signal.aborted) throw signal.reason ?? fail(503, 'The service is stopping.');
-  profileLogins.set(name, true);
+  const auth = JSON.parse(stdout);
+  if (!auth.loggedIn || auth.authMethod !== 'claude.ai' || auth.apiProvider !== 'firstParty') {
+    throw new Error(`Run ${configDir ? `CLAUDE_CONFIG_DIR=${configDir} ` : ''}claude auth login and select your Claude subscription first (profile ${name}).`);
+  }
 }
+await Promise.all([...profiles.keys()].map(checkLogin));
 
 const secondsUntil = until => Math.max(1, Math.ceil((until - Date.now()) / 1000));
 function outOfQuota(profile, until) {
-  const known = Number.isFinite(until);
-  const error = fail(429, `${profile ? `Profile ${profile} is` : 'Every profile is'} out of quota${known ? ` until ${new Date(until).toISOString()}` : ''}.`);
-  if (known) error.retryAfter = secondsUntil(until);
+  if (!Number.isFinite(until)) return fail(429, 'No profile can take this call now; /v1/health shows each profile\'s quota and login.');
+  const error = fail(429, `${profile ? `Profile ${profile} is` : 'Every profile is'} out of quota until ${new Date(until).toISOString()}.`);
+  error.retryAfter = secondsUntil(until);
   return error;
+}
+// Throws while the call can't run: its named profile, or every profile, is out of quota for the model.
+function checkQuota(requested, model) {
+  if (requested) {
+    const until = quota.spentUntil(requested, model);
+    if (until) throw outOfQuota(requested, until);
+  } else if (!quota.usable(model).length) throw outOfQuota(null, quota.nextReset(model));
 }
 // A named profile never changes, and while it is spent its calls fail without starting a process. A call without
 // x-local-profile moves to the next profile when Claude Code reports this one spent, unless its stream has started.
-async function onProfile(requested, model, response, signal, run) {
+async function onProfile(requested, model, response, run) {
   const tried = new Set();
   for (;;) {
     const previous = quota.current;
     const profile = requested ?? quota.choose(model, tried);
+    if (!profile) {
+      if (!response.headersSent) response.removeHeader('x-local-profile');
+      throw outOfQuota(null, quota.nextReset(model));
+    }
+    if (requested) checkQuota(requested, model);
     if (quota.current !== previous) console.error(`${new Date().toISOString()} calls without x-local-profile moved from ${previous} to ${quota.current}`);
-    const until = profile ? quota.spentUntil(profile, model) : quota.nextReset(model);
-    if (!profile || until) throw outOfQuota(profile, until);
-    await assertProfileLogin(profile, signal);
     if (!response.headersSent) response.setHeader('x-local-profile', profile);
     try { return await run(profile, accountEmail(profile)); }
     catch (error) {
-      const spentUntil = error.status === 429 ? quota.spentUntil(profile, model) : 0;
-      if (!spentUntil) throw error;
-      if (requested || response.headersSent) throw Object.assign(error, { retryAfter: secondsUntil(spentUntil) });
+      const until = error.status === 429 ? quota.spentUntil(profile, model) : 0;
+      if (!until) throw error;
+      if (requested || response.headersSent) throw Object.assign(error, { retryAfter: secondsUntil(until) });
       tried.add(profile);
     }
   }
@@ -394,11 +358,14 @@ async function generateRequest(input, response, signal, profile, login) {
     }
     if (input.effort !== undefined) args.push('--effort', input.effort);
     if (input.json_schema !== undefined) args.push('--json-schema', JSON.stringify(input.json_schema));
-    if (input.stream) {
+    // Start the stream on the first output, so a call refused before it can still move to another profile.
+    const begin = () => {
+      if (!input.stream || response.headersSent) return;
       response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' });
       event(response, 'start', { model: input.model, session_id: sessionID });
-    }
+    };
     const result = await runClaude(args, input.prompt, signal, text => {
+      begin();
       if (input.stream) event(response, 'delta', { text });
     }, { profile, login });
     const usedModels = Object.keys(result.modelUsage ?? {});
@@ -422,6 +389,7 @@ async function generateRequest(input, response, signal, profile, login) {
       ...(input.json_schema !== undefined ? { structured_output: result.structured_output } : {}),
     };
     if (input.stream) {
+      begin();
       event(response, 'result', data);
       response.end();
     }
@@ -486,6 +454,8 @@ const server = createServer(async (request, response) => {
       const pinned = input.session_id ? sessions[input.session_id].profile ?? 'default' : requested;
       const settings = reuseOptions(request.headers, path, body, input, backend, requested ?? '*');
       const result = await reuse.run(settings, signal, async workSignal => {
+        // Fail at once rather than after waiting for a slot.
+        if (backend === 'local') checkQuota(pinned, input.model);
         const release = await queue.acquire(workSignal, input.session_id);
         try {
           workSignal.throwIfAborted();
@@ -496,7 +466,7 @@ const server = createServer(async (request, response) => {
             try { return await cloud.run(input, AbortSignal.any([workSignal, shutdown.signal])); }
             finally { activeCalls.delete(stop); }
           }
-          return await onProfile(pinned, input.model, response, workSignal, (profile, login) => anthropic
+          return await onProfile(pinned, input.model, response, (profile, login) => anthropic
             ? messagesRequest(input, response, workSignal, requestID, profile, login) : generateRequest(input, response, workSignal, profile, login));
         } finally { release(); }
       });
@@ -540,7 +510,9 @@ const server = createServer(async (request, response) => {
       }
       if (!Object.hasOwn(sessions, input.session_id)) throw fail(404, 'Unknown saved session.');
       if (sessions[input.session_id].model !== input.model) throw fail(400, 'Use the original model for this session.');
-      if (requested && (sessions[input.session_id].profile ?? 'default') !== requested) throw fail(400, 'Use the original profile for this session.');
+      const sessionProfile = sessions[input.session_id].profile ?? 'default';
+      if (!profiles.has(sessionProfile)) throw fail(400, `This session's profile ${sessionProfile} is no longer in profiles.json.`);
+      if (requested && sessionProfile !== requested) throw fail(400, 'Use the original profile for this session.');
       if (input.save_session !== undefined || input.system !== undefined) {
         throw fail(400, 'Set save_session and system only when starting a session.');
       }
