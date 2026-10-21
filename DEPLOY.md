@@ -16,7 +16,9 @@ untracked: `token`, `profiles.json`, `sessions.json`, and logs are in `.gitignor
   Claude Code must support the `claude-*-5-5` models. Run `claude --version`; the server was validated on 2.1.296, and profile rotation on 2.1.304.
 - **Subscription login.** Run `claude auth status`. It must report `loggedIn: true`, `authMethod: "claude.ai"`, and
   `apiProvider: "firstParty"`. If any value differs, ask the user to run `claude auth login` and select their subscription.
-  The server refuses to start without this login. It does not use API keys. If `profiles.json` exists in `INSTALL_DIR`,
+  On a machine without a browser, a `claude setup-token` token works too: set it as `CLAUDE_CODE_OAUTH_TOKEN` in the
+  service environment, and `auth status` reports `authMethod: "oauth_token"` with it. Profiles with a config directory
+  never get that token. The server refuses to start without a login. It does not use API keys. If `profiles.json` exists in `INSTALL_DIR`,
   run `CLAUDE_CONFIG_DIR=<dir> claude auth status` for each profile too: the server checks every profile at startup.
 - **Port 8787 is free.** Run `lsof -nP -iTCP:8787 -sTCP:LISTEN`. If another process holds the port, ask the user before you continue.
   To use another port, add `CLAUDE_LOCAL_API_PORT` to the service environment and use that port in the steps below.

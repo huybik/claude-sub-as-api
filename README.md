@@ -55,7 +55,8 @@ It keeps your usage low by caching what you mark, as the API does.
 
 ## Quick start
 
-You need Node.js 22+ and [Claude Code](https://code.claude.com) logged in with your subscription (`claude auth login`).
+You need Node.js 22+ and [Claude Code](https://code.claude.com) logged in with your subscription (`claude auth login`, or a `claude setup-token` token in the service's
+`CLAUDE_CODE_OAUTH_TOKEN`).
 
 ```sh
 git clone https://github.com/huybik/claude-sub-as-api.git

@@ -177,7 +177,8 @@ call had it. The follow-up's prompt then starts with the same bytes and reads th
 - **Learning the context.** The adapter learns it from the transcript of a profile's first call on each login, then
   deletes that transcript. That first call can miss the cache once.
 - **Login changes.** Every call reads the profile's current login (`oauthAccount.emailAddress` in its `.claude.json`).
-  After `/login` switches accounts, the next call learns the new context instead of reusing the old account's.
+  After `/login` switches accounts, the next call learns the new context instead of reusing the old account's. A setup
+  token (below) stays the same until the service restarts.
 
 **Measured on 2026-10-12** with Haiku 5.5 at low effort and a 15K-token prefix with a five-minute TTL:
 
@@ -232,7 +233,9 @@ client.messages.create(..., extra_headers={"x-local-cache": "false", "x-local-co
 
 ### Profiles
 
-`profiles.json`, next to `server.mjs`, maps a name to a Claude Code config directory. The server creates it on first start with `{"default": null}` and mode 0600. `default` leaves `CLAUDE_CONFIG_DIR` unset so Claude uses `~/.claude`. Any other value is an absolute directory, or a proxy object (below). The file stays on the machine: a redeploy keeps it, like `token` and `sessions.json`. An unknown name in `x-local-profile` returns HTTP 400. The response's `x-local-profile` names the profile that served the call. A response reused from the local cache or shared with an identical call names none unless the request named one.
+`profiles.json`, next to `server.mjs`, maps a name to a Claude Code config directory. The server creates it on first start with `{"default": null}` and mode 0600. `default` leaves `CLAUDE_CONFIG_DIR` unset so Claude uses `~/.claude`, or the `claude setup-token` token the service
+environment sets as `CLAUDE_CODE_OAUTH_TOKEN`: profiles without a config directory use that token, and profiles with
+one never get it. Any other value is an absolute directory, or a proxy object (below). The file stays on the machine: a redeploy keeps it, like `token` and `sessions.json`. An unknown name in `x-local-profile` returns HTTP 400. The response's `x-local-profile` names the profile that served the call. A response reused from the local cache or shared with an identical call names none unless the request named one.
 
 ```python
 client.messages.create(..., extra_headers={"x-local-profile": "claude-p"})
@@ -246,8 +249,8 @@ The server checks every profile's `claude auth status` at startup and does not s
 
 - `base_url` becomes `ANTHROPIC_BASE_URL`. It must be `http://` on `127.0.0.1`, `localhost` or `[::1]` with a port,
   since Claude Code sends the profile's login token to it. A path is kept, so TeamClaude's `/tc-acct/<account>` pin works.
-- `config_dir` is optional; without it Claude Code uses `~/.claude`. Claude Code checks that login before it sends
-  anything, and TeamClaude swaps in a token from its own pool.
+- `config_dir` is optional; without it Claude Code uses `~/.claude` or the setup token. Claude Code checks that login
+  before it sends anything, and TeamClaude swaps in a token from its own pool.
 - Claude Code retries once instead of ten times (`CLAUDE_CODE_MAX_RETRIES=1`). That one retry is the second try
   TeamClaude leaves to the client after an overloaded upstream.
 - Before each call the server checks that something accepts connections on the proxy's port. While nothing does, a
@@ -313,7 +316,8 @@ while `/v1/health` shows no active or queued calls. `token`, `profiles.json`, an
 - **What each Claude Code process gets:**
   - Your existing login, in safe mode, with no built-in tools.
   - No user, project, or local settings files.
-  - Inherited API keys and provider variables removed.
+  - Inherited API keys and provider variables removed. A `CLAUDE_CODE_OAUTH_TOKEN` setup token stays for profiles
+    without a config directory.
   - Only the requested model, with fallback off.
 - **Tools.** Only the client tool definitions you send are exposed, and your application runs them. The server never
   runs shell or file tools.
