@@ -4,6 +4,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions: [Sem
 
 ## Unreleased
 
+- DEPLOY.md installs by cloning the repository into `~/.local/share/claude-local-api`; an update is `git pull --ff-only`
+  and a restart. `token`, `profiles.json`, and `sessions.json` stay untracked there.
 - A profile can send its calls through a local proxy such as TeamClaude, as `teamclaude run --no-mitm` does:
   `{"base_url": "http://localhost:3456"}` in `profiles.json`, with an optional `config_dir`. Claude Code retries once
   there instead of ten times. Calls without `x-local-profile` move on while nothing accepts connections on the proxy's
