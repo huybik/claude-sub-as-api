@@ -69,8 +69,8 @@ HTTP 502 with the session URL so you can stop it. Creation is not retried: if it
 
 Cloud mode reads the default Claude Code OAuth login from the macOS **Claude Code-credentials** Keychain item,
 or `~/.claude/.credentials.json` on Linux. It does not save or log the token and sends it only to
-`https://api.anthropic.com`. A non-default `x-local-profile` returns HTTP 400. If the login expires, run
-`claude auth login` and restart the service. All cloud input and replies remain in the archived cloud transcript;
+`https://api.anthropic.com`. A non-default `x-local-profile` returns HTTP 400. A setup token is not used here, so a
+machine signed in only with one has no cloud mode. If the login expires, run `claude auth login` and restart the service. All cloud input and replies remain in the archived cloud transcript;
 they are not deleted from the account.
 
 The cloud session API is undocumented and may change. Promotional cloud credits apply only while eligible credits
@@ -349,7 +349,7 @@ Unsupported input fails explicitly; it is never silently converted to different 
 
 | Symptom | Fix |
 | --- | --- |
-| Service won't start; log says "Run claude auth login…" | Run `claude auth login`, choose your subscription, then restart the service. |
+| Service won't start; log says "Run claude auth login…" | Run `claude auth login`, choose your subscription, then restart the service. On a machine without a browser, set a `claude setup-token` token as the service's `CLAUDE_CODE_OAUTH_TOKEN` instead. |
 | `401 Invalid local API token` | Read the key from `~/.local/share/claude-local-api/token`; don't use an Anthropic API key. |
 | `429` errors | The profiles the call may use are out of quota; `/v1/health` shows when each resets. Add a profile, wait for the reset, or restart after raising a limit. The server never falls back to a paid API. |
 | `502 Profile <name>'s proxy at … is not accepting connections`, or `502 API Error: Connection refused` on a proxy profile | Start that proxy (`teamclaude server`), or remove the profile and restart. |

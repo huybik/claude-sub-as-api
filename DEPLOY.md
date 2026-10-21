@@ -14,11 +14,13 @@ untracked: `token`, `profiles.json`, `sessions.json`, and logs are in `.gitignor
   With nvm, use the real version path, such as `~/.nvm/versions/node/v22.x.y/bin/node`, not a shim.
 - **Claude Code on `PATH`.** The server runs `claude` through `PATH`. Record the directory from `command -v claude`.
   Claude Code must support the `claude-*-5-5` models. Run `claude --version`; the server was validated on 2.1.296, and profile rotation on 2.1.304.
-- **Subscription login.** Run `claude auth status`. It must report `loggedIn: true`, `authMethod: "claude.ai"`, and
-  `apiProvider: "firstParty"`. If any value differs, ask the user to run `claude auth login` and select their subscription.
-  On a machine without a browser, a `claude setup-token` token works too: set it as `CLAUDE_CODE_OAUTH_TOKEN` in the
-  service environment, and `auth status` reports `authMethod: "oauth_token"` with it. Profiles with a config directory
-  never get that token. The server refuses to start without a login. It does not use API keys. If `profiles.json` exists in `INSTALL_DIR`,
+- **Subscription login.** Either:
+  - Run `claude auth status`. It must report `loggedIn: true`, `authMethod: "claude.ai"`, and `apiProvider: "firstParty"`.
+    If any value differs, ask the user to run `claude auth login` and select their subscription.
+  - Or, on a machine without a browser, use a token from `claude setup-token`. The service environment sets it as
+    `CLAUDE_CODE_OAUTH_TOKEN` (on Linux, a mode 0600 `EnvironmentFile` holding `CLAUDE_CODE_OAUTH_TOKEN=...`). Profiles
+    without a config directory use it and must then report `authMethod: "oauth_token"`; profiles with one never get it.
+  The server refuses to start without a login. It does not use API keys. If `profiles.json` exists in `INSTALL_DIR`,
   run `CLAUDE_CONFIG_DIR=<dir> claude auth status` for each profile too: the server checks every profile at startup.
 - **Port 8787 is free.** Run `lsof -nP -iTCP:8787 -sTCP:LISTEN`. If another process holds the port, ask the user before you continue.
   To use another port, add `CLAUDE_LOCAL_API_PORT` to the service environment and use that port in the steps below.
@@ -72,6 +74,7 @@ The agent starts at login and restarts the server if it exits.
 Write an equivalent systemd user unit, such as `~/.config/systemd/user/claude-local-api.service`:
 - `ExecStart`: the launcher path.
 - `WorkingDirectory`: `INSTALL_DIR`.
+- `EnvironmentFile`: the setup-token file from step 1, when the machine uses one.
 - `Restart=always`.
 - Output goes to the journal.
 

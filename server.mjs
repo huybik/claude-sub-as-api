@@ -278,8 +278,10 @@ async function checkLogin(name) {
   }
   let auth;
   try { auth = JSON.parse(stdout); } catch { throw new Error(`Profile ${name} returned an unreadable auth status: ${stdout.slice(0, 200)}`); }
-  // A setup token reports oauth_token.
-  if (!auth.loggedIn || !['claude.ai', 'oauth_token'].includes(auth.authMethod) || auth.apiProvider !== 'firstParty') {
+  // A setup token reports oauth_token. So does an Anthropic Console login, billed as API usage, so only a profile that
+  // gets the token may report it.
+  const method = profileEnv.CLAUDE_CODE_OAUTH_TOKEN ? 'oauth_token' : 'claude.ai';
+  if (!auth.loggedIn || auth.authMethod !== method || auth.apiProvider !== 'firstParty') {
     throw new Error(`Run ${configDir ? `CLAUDE_CONFIG_DIR=${configDir} ` : ''}claude auth login and select your Claude subscription first (profile ${name}).`);
   }
 }
