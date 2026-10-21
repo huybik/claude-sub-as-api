@@ -130,7 +130,7 @@ as `teamclaude run --no-mitm` does. TeamClaude then picks the account from its o
 ```
 
 Claude Code still needs its own login: `~/.claude`, or the profile's `config_dir`. While TeamClaude is down, calls
-naming the profile fail at once and calls without the header use another profile. TeamClaude's config decides which
+naming the profile fail with HTTP 502 and calls without the header use another profile. TeamClaude's config decides which
 accounts and models serve these calls, API keys included. See the [reference](docs/reference.md#profiles).
 
 ## Good to know (local mode)

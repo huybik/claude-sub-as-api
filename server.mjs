@@ -298,8 +298,8 @@ function checkQuota(requested, model) {
     if (until) throw outOfQuota(requested, until);
   } else if (!quota.usable(model).length) throw noProfile(model);
 }
-// Whether something accepts connections on the proxy's port, the same check TeamClaude makes for itself. Claude Code
-// would take seconds to fail on a closed port, and nothing in its error would move a call off the profile.
+// Whether something accepts connections on the proxy's port, as TeamClaude checks its own. Claude Code would take
+// seconds to fail on a closed port, and nothing in its error would move a call off the profile.
 function listening({ hostname, port }) {
   return new Promise(resolve => {
     const socket = connect({ host: hostname.replace(/^\[(.*)\]$/, '$1'), port: Number(port), timeout: 1000 });
@@ -314,14 +314,12 @@ async function onProfile(requested, model, response, run) {
   const tried = new Set();
   let down;
   for (;;) {
-    const previous = quota.current;
     const profile = requested ?? quota.choose(model, tried);
     if (!profile) {
       if (!response.headersSent) response.removeHeader('x-local-profile');
       throw down ?? noProfile(model);
     }
     if (requested) checkQuota(requested, model);
-    if (quota.current !== previous) console.error(`${new Date().toISOString()} calls without x-local-profile moved from ${previous} to ${quota.current}`);
     const { proxy } = profiles.get(profile);
     if (proxy && !await listening(proxy)) {
       down = fail(502, `Profile ${profile}'s proxy at ${proxy.origin} is not accepting connections.`);
@@ -329,6 +327,10 @@ async function onProfile(requested, model, response, run) {
       console.error(`${new Date().toISOString()} ${down.message}`);
       tried.add(profile);
       continue;
+    }
+    if (!requested && quota.current !== profile) {
+      console.error(`${new Date().toISOString()} calls without x-local-profile moved from ${quota.current} to ${profile}`);
+      quota.current = profile;
     }
     if (!response.headersSent) response.setHeader('x-local-profile', profile);
     try { return await run(profile, accountEmail(profile)); }

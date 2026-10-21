@@ -69,14 +69,13 @@ export class ProfileQuota {
   }
 
   // The current profile while it has plan quota, else the first in profiles.json order that has. A profile on paid
-  // extra usage is used only when none has plan quota. Undefined when no untried profile can serve the model.
+  // extra usage is used only when none has plan quota. Undefined when no untried profile can serve the model. The
+  // caller makes the choice current once a call runs there.
   choose(model, tried, now = Date.now()) {
     const usable = this.usable(model, tried, now);
     const plan = usable.filter(profile => !profile.extraUsage);
     const pool = (plan.length ? plan : usable).map(profile => profile.name);
-    const choice = pool.includes(this.current) ? this.current : pool[0];
-    if (choice) this.current = choice;
-    return choice;
+    return pool.includes(this.current) ? this.current : pool[0];
   }
 
   // The earliest time a profile can serve this model again; Infinity when none reported a reset.

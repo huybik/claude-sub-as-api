@@ -251,8 +251,8 @@ The server checks every profile's `claude auth status` at startup and does not s
 - Claude Code retries once instead of ten times (`CLAUDE_CODE_MAX_RETRIES=1`). That one retry is the second try
   TeamClaude leaves to the client after an overloaded upstream.
 - Before each call the server checks that something accepts connections on the proxy's port. While nothing does, a
-  call naming the profile fails at once with HTTP 502, and calls without `x-local-profile` move to the next profile and
-  stay there, as after a quota move. The service log notes each skip.
+  call naming the profile fails with HTTP 502 without starting a process, and calls without `x-local-profile` move to
+  the next profile and stay there, as after a quota move. The service log notes each skip.
 - Quota reports describe whichever account the proxy used, so one pool account on paid extra usage marks the whole
   profile as on extra usage. Once its whole pool is spent, TeamClaude answers 429 with only `retry-after`, which Claude
   Code does not pass on. Any 429 without a reset time from the proxy, including its pinned-account and request-scoped
@@ -279,8 +279,8 @@ profile's last report, keyed by that profile's login, so a `/login` to another a
   current profile is out of quota, it moves to the first profile in file order that has quota left. Staying on one
   profile keeps prompt caches warm, since a cache belongs to one account. A profile last seen running on paid extra usage
   is used only when no other profile has plan quota, until its plan window resets. A profile whose login can't be read,
-  or whose proxy is down, is skipped. A call refused before its stream started is retried on the next profile; one refused after it started
-  returns the error. Each move writes one line to the service log.
+  or whose proxy is down, is skipped. A call refused before its stream started is retried on the next profile; one
+  refused after it started returns the error. Each move writes one line to the service log.
 - **Calls that name a profile** never move. While that profile is out of quota, they return HTTP 429 with
   `retry-after` at once, without waiting for a slot or starting a process. So do rotating calls when every profile is out.
 - **Recovery.** If you raise a spend limit or log a spent profile in again before its reset, restart the service. A
@@ -348,7 +348,7 @@ Unsupported input fails explicitly; it is never silently converted to different 
 | Service won't start; log says "Run claude auth login…" | Run `claude auth login`, choose your subscription, then restart the service. |
 | `401 Invalid local API token` | Read the key from `~/.local/share/claude-local-api/token`; don't use an Anthropic API key. |
 | `429` errors | The profiles the call may use are out of quota; `/v1/health` shows when each resets. Add a profile, wait for the reset, or restart after raising a limit. The server never falls back to a paid API. |
-| `502 Profile <name>'s proxy at … is not accepting connections` | Start that proxy (`teamclaude server`), or remove the profile and restart. |
+| `502 Profile <name>'s proxy at … is not accepting connections`, or `502 API Error: Connection refused` on a proxy profile | Start that proxy (`teamclaude server`), or remove the profile and restart. |
 | Cache reads stay at 0 | Mark a block with `cache_control`, or set top-level `cache_control`. |
 | Port 8787 in use | Stop the other process, or set `CLAUDE_LOCAL_API_PORT`. |
 
