@@ -211,7 +211,7 @@ function profileFor(configDir, baseUrl = null) {
 }
 // Names in profiles.json. A name maps to a config directory, or to an object whose base_url sends the profile's calls
 // through a local proxy, as `teamclaude run --no-mitm` does. No config directory (default, or an object without
-// config_dir) keeps CLAUDE_CONFIG_DIR unset, which is the default ~/.claude login.
+// config_dir) keeps CLAUDE_CONFIG_DIR unset: the default ~/.claude login, or the service's setup token.
 function loadProfiles() {
   const profilesPath = join(directory, 'profiles.json');
   if (!existsSync(profilesPath)) writeFileSync(profilesPath, '{\n  "default": null\n}\n', { mode: 0o600 });
