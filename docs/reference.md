@@ -296,8 +296,8 @@ launchctl bootout "gui/$(id -u)/local.claude-api"                          # sto
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/local.claude-api.plist   # start again
 ```
 
-**Update.** Pull the repository, repeat DEPLOY.md step 2 to copy the files, then restart. Keep the installed
-`token`, `profiles.json`, and `sessions.json`.
+**Update.** The install is a clone of `main`: run `git -C ~/.local/share/claude-local-api pull --ff-only`, then restart
+while `/v1/health` shows no active or queued calls. `token`, `profiles.json`, and `sessions.json` are untracked and stay.
 
 **Service logs.** `~/.local/share/claude-local-api/server.log` (macOS) or `journalctl --user -u claude-local-api` (Linux).
 

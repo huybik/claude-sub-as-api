@@ -4,8 +4,9 @@ You are deploying a small local HTTP server. It exposes an Anthropic-compatible 
 `http://127.0.0.1:8787` and answers each call by running the user's Claude Code CLI with their Claude subscription.
 `README.md` and `docs/reference.md` are the user guide. `CONTEXT.md` holds the implementation notes. Read them before you change anything.
 
-Install directory: `~/.local/share/claude-local-api` (call it `INSTALL_DIR`). The server uses the directory that holds
-`server.mjs` as its working directory and stores its files there.
+Install directory: `~/.local/share/claude-local-api` (call it `INSTALL_DIR`), a clone of this repository's `main`
+branch. The server uses the directory that holds `server.mjs` as its working directory and stores its files there,
+untracked: `token`, `profiles.json`, `sessions.json`, and logs are in `.gitignore`.
 
 ## 1. Check prerequisites and stop on any failure
 
@@ -20,20 +21,18 @@ Install directory: `~/.local/share/claude-local-api` (call it `INSTALL_DIR`). Th
 - **Port 8787 is free.** Run `lsof -nP -iTCP:8787 -sTCP:LISTEN`. If another process holds the port, ask the user before you continue.
   To use another port, add `CLAUDE_LOCAL_API_PORT` to the service environment and use that port in the steps below.
 
-## 2. Copy the files
+## 2. Clone the repository
 
 ```sh
-mkdir -p ~/.local/share/claude-local-api/docs ~/.local/bin
-cp server.mjs anthropic.mjs cloud.mjs queue.mjs reuse.mjs quota.mjs README.md CONTEXT.md CHANGELOG.md ~/.local/share/claude-local-api/
-cp docs/reference.md ~/.local/share/claude-local-api/docs/
+git clone https://github.com/huybik/claude-sub-as-api.git ~/.local/share/claude-local-api
+mkdir -p ~/.local/bin
 ```
 
-Do not copy `DEPLOY.md` or `deploy/`. Do not create a `CLAUDE.md` in `INSTALL_DIR`.
-Every Claude subprocess runs there, so a `CLAUDE.md` would add its text to every request.
+Do not create a `CLAUDE.md` in `INSTALL_DIR`, and keep the repository free of one. Every Claude subprocess runs there,
+so a `CLAUDE.md` would add its text to every request.
 
-The package does not include a `token` or `profiles.json`. On the first start, the server creates a random local key in
-`INSTALL_DIR/token` with mode 0600, and `profiles.json` containing `{"default": null}`. If you redeploy over an existing
-install, keep its `token`, `profiles.json`, and `sessions.json`.
+On the first start, the server creates a random local key in `INSTALL_DIR/token` with mode 0600, and `profiles.json`
+containing `{"default": null}`.
 
 ## 3. Install the launcher
 
@@ -62,6 +61,7 @@ launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/local.claude-api.plist
 ```
 
 If `local.claude-api` is already loaded, apply updated code with `launchctl kickstart -k "gui/$(id -u)/local.claude-api"`.
+A kickstart cancels running calls, so wait until `/v1/health` shows `active` and `queued` at 0.
 A kickstart does not reread the plist. After a plist change, run `launchctl bootout "gui/$(id -u)/local.claude-api"`, then run the bootstrap command again.
 The agent starts at login and restarts the server if it exits.
 
@@ -106,3 +106,11 @@ Report:
 
 Tell the user to point the Anthropic SDK at `base_url="http://127.0.0.1:8787"`, with `api_key` read from the token file,
 `max_retries=0`, and `timeout=1800`. Also tell them that `README.md` lists the request fields that return HTTP 400, and `docs/reference.md` has the details.
+
+## Update an install
+
+```sh
+git -C ~/.local/share/claude-local-api pull --ff-only
+```
+
+Then restart the service as in step 4 and verify it as in step 5.
