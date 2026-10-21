@@ -33,6 +33,9 @@ const env = { ...process.env };
 for (const name of Object.keys(env)) {
   if (/^(ANTHROPIC_|CLAUDE_CODE_|CLAUDE_CONFIG_DIR$|CLAUDECODE$)/.test(name)) delete env[name];
 }
+// A `claude setup-token` subscription login in the service environment stands for the ~/.claude login. Profiles with a
+// config directory never get it: Claude Code would use it in place of their own login.
+const oauthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN || null;
 const options = { cwd: directory, env, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 1_200_000 };
 
 // One call per GiB of memory: a Claude Code process holds about 250 MB, so a full machine stays out of swap.
@@ -202,13 +205,13 @@ function proxyUrl(name, value) {
 // hold a call for minutes on a refused connection or on the five-second retry-after of a pinned account.
 function profileFor(configDir, baseUrl = null) {
   return { configDir, proxy: baseUrl && new URL(baseUrl), env: {
-    ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}),
+    ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : oauthToken ? { CLAUDE_CODE_OAUTH_TOKEN: oauthToken } : {}),
     ...(baseUrl ? { ANTHROPIC_BASE_URL: baseUrl, CLAUDE_CODE_MAX_RETRIES: '1' } : {}),
   } };
 }
 // Names in profiles.json. A name maps to a config directory, or to an object whose base_url sends the profile's calls
 // through a local proxy, as `teamclaude run --no-mitm` does. No config directory (default, or an object without
-// config_dir) keeps CLAUDE_CONFIG_DIR unset, which is the default ~/.claude login.
+// config_dir) keeps CLAUDE_CONFIG_DIR unset: the default ~/.claude login, or the service's setup token.
 function loadProfiles() {
   const profilesPath = join(directory, 'profiles.json');
   if (!existsSync(profilesPath)) writeFileSync(profilesPath, '{\n  "default": null\n}\n', { mode: 0o600 });
@@ -241,9 +244,12 @@ function loadProfiles() {
   return loaded;
 }
 const profiles = loadProfiles();
-// The login Claude Code uses for a profile. It writes .claude.json atomically, so a read never sees half a file.
+// The login Claude Code uses for a profile. It writes .claude.json atomically, so a read never sees half a file. A setup
+// token writes no account there, and it can't change while the service runs.
 function accountEmail(name) {
-  const configPath = join(profiles.get(name).configDir ?? homedir(), '.claude.json');
+  const { configDir } = profiles.get(name);
+  if (!configDir && oauthToken) return 'setup token';
+  const configPath = join(configDir ?? homedir(), '.claude.json');
   let email;
   try { email = JSON.parse(readFileSync(configPath, 'utf8')).oauthAccount?.emailAddress; }
   catch (error) { throw fail(502, `Cannot read the login of profile ${name}: ${error.message}`); }
@@ -272,7 +278,10 @@ async function checkLogin(name) {
   }
   let auth;
   try { auth = JSON.parse(stdout); } catch { throw new Error(`Profile ${name} returned an unreadable auth status: ${stdout.slice(0, 200)}`); }
-  if (!auth.loggedIn || auth.authMethod !== 'claude.ai' || auth.apiProvider !== 'firstParty') {
+  // A setup token reports oauth_token. So does an Anthropic Console login, billed as API usage, so only a profile that
+  // gets the token may report it.
+  const method = profileEnv.CLAUDE_CODE_OAUTH_TOKEN ? 'oauth_token' : 'claude.ai';
+  if (!auth.loggedIn || auth.authMethod !== method || auth.apiProvider !== 'firstParty') {
     throw new Error(`Run ${configDir ? `CLAUDE_CONFIG_DIR=${configDir} ` : ''}claude auth login and select your Claude subscription first (profile ${name}).`);
   }
 }

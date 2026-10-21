@@ -69,8 +69,8 @@ HTTP 502 with the session URL so you can stop it. Creation is not retried: if it
 
 Cloud mode reads the default Claude Code OAuth login from the macOS **Claude Code-credentials** Keychain item,
 or `~/.claude/.credentials.json` on Linux. It does not save or log the token and sends it only to
-`https://api.anthropic.com`. A non-default `x-local-profile` returns HTTP 400. If the login expires, run
-`claude auth login` and restart the service. All cloud input and replies remain in the archived cloud transcript;
+`https://api.anthropic.com`. A non-default `x-local-profile` returns HTTP 400. A setup token is not used here, so a
+machine signed in only with one has no cloud mode. If the login expires, run `claude auth login` and restart the service. All cloud input and replies remain in the archived cloud transcript;
 they are not deleted from the account.
 
 The cloud session API is undocumented and may change. Promotional cloud credits apply only while eligible credits
@@ -177,7 +177,8 @@ call had it. The follow-up's prompt then starts with the same bytes and reads th
 - **Learning the context.** The adapter learns it from the transcript of a profile's first call on each login, then
   deletes that transcript. That first call can miss the cache once.
 - **Login changes.** Every call reads the profile's current login (`oauthAccount.emailAddress` in its `.claude.json`).
-  After `/login` switches accounts, the next call learns the new context instead of reusing the old account's.
+  After `/login` switches accounts, the next call learns the new context instead of reusing the old account's. A setup
+  token (below) stays the same until the service restarts.
 
 **Measured on 2026-10-12** with Haiku 5.5 at low effort and a 15K-token prefix with a five-minute TTL:
 
@@ -232,7 +233,9 @@ client.messages.create(..., extra_headers={"x-local-cache": "false", "x-local-co
 
 ### Profiles
 
-`profiles.json`, next to `server.mjs`, maps a name to a Claude Code config directory. The server creates it on first start with `{"default": null}` and mode 0600. `default` leaves `CLAUDE_CONFIG_DIR` unset so Claude uses `~/.claude`. Any other value is an absolute directory, or a proxy object (below). The file stays on the machine: a redeploy keeps it, like `token` and `sessions.json`. An unknown name in `x-local-profile` returns HTTP 400. The response's `x-local-profile` names the profile that served the call. A response reused from the local cache or shared with an identical call names none unless the request named one.
+`profiles.json`, next to `server.mjs`, maps a name to a Claude Code config directory. The server creates it on first start with `{"default": null}` and mode 0600. `default` leaves `CLAUDE_CONFIG_DIR` unset so Claude uses `~/.claude`, or the `claude setup-token` token the service
+environment sets as `CLAUDE_CODE_OAUTH_TOKEN`: profiles without a config directory use that token, and profiles with
+one never get it. Any other value is an absolute directory, or a proxy object (below). The file stays on the machine: a redeploy keeps it, like `token` and `sessions.json`. An unknown name in `x-local-profile` returns HTTP 400. The response's `x-local-profile` names the profile that served the call. A response reused from the local cache or shared with an identical call names none unless the request named one.
 
 ```python
 client.messages.create(..., extra_headers={"x-local-profile": "claude-p"})
@@ -246,8 +249,8 @@ The server checks every profile's `claude auth status` at startup and does not s
 
 - `base_url` becomes `ANTHROPIC_BASE_URL`. It must be `http://` on `127.0.0.1`, `localhost` or `[::1]` with a port,
   since Claude Code sends the profile's login token to it. A path is kept, so TeamClaude's `/tc-acct/<account>` pin works.
-- `config_dir` is optional; without it Claude Code uses `~/.claude`. Claude Code checks that login before it sends
-  anything, and TeamClaude swaps in a token from its own pool.
+- `config_dir` is optional; without it Claude Code uses `~/.claude` or the setup token. Claude Code checks that login
+  before it sends anything, and TeamClaude swaps in a token from its own pool.
 - Claude Code retries once instead of ten times (`CLAUDE_CODE_MAX_RETRIES=1`). That one retry is the second try
   TeamClaude leaves to the client after an overloaded upstream.
 - Before each call the server checks that something accepts connections on the proxy's port. While nothing does, a
@@ -313,7 +316,8 @@ while `/v1/health` shows no active or queued calls. `token`, `profiles.json`, an
 - **What each Claude Code process gets:**
   - Your existing login, in safe mode, with no built-in tools.
   - No user, project, or local settings files.
-  - Inherited API keys and provider variables removed.
+  - Inherited API keys and provider variables removed. A `CLAUDE_CODE_OAUTH_TOKEN` setup token stays for profiles
+    without a config directory.
   - Only the requested model, with fallback off.
 - **Tools.** Only the client tool definitions you send are exposed, and your application runs them. The server never
   runs shell or file tools.
@@ -345,7 +349,7 @@ Unsupported input fails explicitly; it is never silently converted to different 
 
 | Symptom | Fix |
 | --- | --- |
-| Service won't start; log says "Run claude auth login…" | Run `claude auth login`, choose your subscription, then restart the service. |
+| Service won't start; log says "Run claude auth login…" | Run `claude auth login`, choose your subscription, then restart the service. On a machine without a browser, set a `claude setup-token` token as the service's `CLAUDE_CODE_OAUTH_TOKEN` instead. |
 | `401 Invalid local API token` | Read the key from `~/.local/share/claude-local-api/token`; don't use an Anthropic API key. |
 | `429` errors | The profiles the call may use are out of quota; `/v1/health` shows when each resets. Add a profile, wait for the reset, or restart after raising a limit. The server never falls back to a paid API. |
 | `502 Profile <name>'s proxy at … is not accepting connections`, or `502 API Error: Connection refused` on a proxy profile | Start that proxy (`teamclaude server`), or remove the profile and restart. |

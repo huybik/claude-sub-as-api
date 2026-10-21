@@ -55,7 +55,8 @@ It keeps your usage low by caching what you mark, as the API does.
 
 ## Quick start
 
-You need Node.js 22+ and [Claude Code](https://code.claude.com) logged in with your subscription (`claude auth login`).
+You need Node.js 22+ and [Claude Code](https://code.claude.com) logged in with your subscription (`claude auth login`, or a `claude setup-token` token in the service's
+`CLAUDE_CODE_OAUTH_TOKEN`).
 
 ```sh
 git clone https://github.com/huybik/claude-sub-as-api.git
@@ -102,7 +103,7 @@ See the [cloud reference](docs/reference.md#cloud-mode-experimental) for exact l
 
 ## Profiles
 
-Profiles are the Claude subscriptions the server can use. Names come from [`profiles.json`](profiles.json). `default` is the normal `~/.claude` login. Other names set `CLAUDE_CONFIG_DIR` for that call, or go through TeamClaude (below). Every profile must be logged in when the server starts.
+Profiles are the Claude subscriptions the server can use. Names come from [`profiles.json`](profiles.json). `default` is the normal `~/.claude` login, or the service's `claude setup-token` token. Other names set `CLAUDE_CONFIG_DIR` for that call, or go through TeamClaude (below). Every profile must be logged in when the server starts.
 
 - **No header:** the call stays on one profile, in `profiles.json` order, until that subscription's limit is reached.
   Then it moves to the first profile in that order with quota left, so a conversation's prompt cache is lost only when it has to move.
@@ -129,7 +130,7 @@ as `teamclaude run --no-mitm` does. TeamClaude then picks the account from its o
 }
 ```
 
-Claude Code still needs its own login: `~/.claude`, or the profile's `config_dir`. While TeamClaude is down, calls
+Claude Code still needs its own login: `~/.claude` or the setup token, or the profile's `config_dir`. While TeamClaude is down, calls
 naming the profile fail with HTTP 502 and calls without the header use another profile. TeamClaude's config decides which
 accounts and models serve these calls, API keys included. See the [reference](docs/reference.md#profiles).
 
