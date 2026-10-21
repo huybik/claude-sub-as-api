@@ -2,6 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { connect } from 'node:net';
 import { homedir, totalmem } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -200,7 +201,7 @@ function proxyUrl(name, value) {
 // One retry, not Claude Code's ten: TeamClaude leaves an overloaded upstream's second try to the client, and more would
 // hold a call for minutes on a refused connection or on the five-second retry-after of a pinned account.
 function profileFor(configDir, baseUrl = null) {
-  return { configDir, proxied: Boolean(baseUrl), env: {
+  return { configDir, proxy: baseUrl && new URL(baseUrl), env: {
     ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}),
     ...(baseUrl ? { ANTHROPIC_BASE_URL: baseUrl, CLAUDE_CODE_MAX_RETRIES: '1' } : {}),
   } };
@@ -249,7 +250,7 @@ function accountEmail(name) {
   if (!email) throw fail(502, `Profile ${name} has no Claude login in ${configPath}.`);
   return email;
 }
-const quota = new ProfileQuota([...profiles.keys()], accountEmail, name => profiles.get(name).proxied);
+const quota = new ProfileQuota([...profiles.keys()], accountEmail, name => Boolean(profiles.get(name).proxy));
 // No header: the call runs on the profile quota.mjs chooses.
 function selectedProfile(distinct) {
   const values = distinct['x-local-profile'];
@@ -297,25 +298,44 @@ function checkQuota(requested, model) {
     if (until) throw outOfQuota(requested, until);
   } else if (!quota.usable(model).length) throw noProfile(model);
 }
-// A named profile never changes, and while it is spent its calls fail without starting a process. A call without
-// x-local-profile moves to the next profile when Claude Code reports this one spent, unless its stream has started.
+// Whether something accepts connections on the proxy's port, the same check TeamClaude makes for itself. Claude Code
+// would take seconds to fail on a closed port, and nothing in its error would move a call off the profile.
+function listening({ hostname, port }) {
+  return new Promise(resolve => {
+    const socket = connect({ host: hostname.replace(/^\[(.*)\]$/, '$1'), port: Number(port), timeout: 1000 });
+    const done = up => { socket.destroy(); resolve(up); };
+    socket.once('connect', () => done(true)).once('error', () => done(false)).once('timeout', () => done(false));
+  });
+}
+// A named profile never changes, and while it is spent or its proxy is down its calls fail without starting a process.
+// A call without x-local-profile moves to the next profile when this one's proxy is down, or when Claude Code reports
+// it spent and the stream has not started.
 async function onProfile(requested, model, response, run) {
   const tried = new Set();
+  let down;
   for (;;) {
     const previous = quota.current;
     const profile = requested ?? quota.choose(model, tried);
     if (!profile) {
       if (!response.headersSent) response.removeHeader('x-local-profile');
-      throw noProfile(model);
+      throw down ?? noProfile(model);
     }
     if (requested) checkQuota(requested, model);
     if (quota.current !== previous) console.error(`${new Date().toISOString()} calls without x-local-profile moved from ${previous} to ${quota.current}`);
+    const { proxy } = profiles.get(profile);
+    if (proxy && !await listening(proxy)) {
+      down = fail(502, `Profile ${profile}'s proxy at ${proxy.origin} is not accepting connections.`);
+      if (requested) throw down;
+      console.error(`${new Date().toISOString()} ${down.message}`);
+      tried.add(profile);
+      continue;
+    }
     if (!response.headersSent) response.setHeader('x-local-profile', profile);
     try { return await run(profile, accountEmail(profile)); }
     catch (error) {
       const until = error.status === 429 ? quota.spentUntil(profile, model) : 0;
       // A proxy profile's 429 moves the call even when a newer call's success kept the profile usable.
-      if (!until && !(error.status === 429 && profiles.get(profile).proxied)) throw error;
+      if (!until && !(error.status === 429 && proxy)) throw error;
       if (requested || response.headersSent) throw Object.assign(error, until ? { retryAfter: secondsUntil(until) } : {});
       tried.add(profile);
     }
