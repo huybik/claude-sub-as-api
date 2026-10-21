@@ -47,7 +47,8 @@ It keeps your usage low by caching what you mark, as the API does.
 - **Messages API features:** streaming, tool use, images, structured output, effort levels, and adaptive thinking.
 - **Models:** Sonnet 5.5, Opus 5.5, and Haiku 5.5.
 - **Prompt caching** with `cache_control`. Shared prefixes, follow-ups, and tool turns read about 97% from the cache.
-- **Several subscriptions:** calls stay on one [profile](#profiles) until its limit is reached, then move to the next.
+- **Several subscriptions:** calls stay on one [profile](#profiles) until its limit is reached, then move to the next. A profile can also go
+  through [TeamClaude](https://github.com/KarpelesLab/teamclaude)'s account pool.
 - **Concurrency:** one concurrent call per GiB of RAM (48 on a 48 GB Mac), the rest wait; plus a local response cache
   and a usage counter.
 - **Service:** runs as a macOS LaunchAgent or a Linux systemd unit, bound to `127.0.0.1` behind a local key.
@@ -101,7 +102,7 @@ See the [cloud reference](docs/reference.md#cloud-mode-experimental) for exact l
 
 ## Profiles
 
-Profiles are the Claude subscriptions the server can use. Names come from [`profiles.json`](profiles.json). `default` is the normal `~/.claude` login. Other names set `CLAUDE_CONFIG_DIR` for that call. Every profile must be logged in when the server starts.
+Profiles are the Claude subscriptions the server can use. Names come from [`profiles.json`](profiles.json). `default` is the normal `~/.claude` login. Other names set `CLAUDE_CONFIG_DIR` for that call, or go through TeamClaude (below). Every profile must be logged in when the server starts.
 
 - **No header:** the call stays on one profile, in `profiles.json` order, until that subscription's limit is reached.
   Then it moves to the first profile in that order with quota left, so a conversation's prompt cache is lost only when it has to move.
@@ -117,6 +118,21 @@ reply = client.messages.create(
 )
 ```
 
+**Through TeamClaude.** A profile can send its calls through [TeamClaude](https://github.com/KarpelesLab/teamclaude),
+as `teamclaude run --no-mitm` does. TeamClaude then picks the account from its own pool and rotates it.
+`teamclaude env --no-mitm` prints the URL:
+
+```json
+{
+  "default": null,
+  "teamclaude": {"base_url": "http://localhost:3456"}
+}
+```
+
+Claude Code still needs its own login: `~/.claude`, or the profile's `config_dir`. While TeamClaude is down, calls
+naming the profile fail with HTTP 502 and calls without the header use another profile. TeamClaude's config decides which
+accounts and models serve these calls, API keys included. See the [reference](docs/reference.md#profiles).
+
 ## Good to know (local mode)
 
 - **Cache what you reuse.** Unmarked requests are not prompt-cached. Put `cache_control: {"type": "ephemeral"}` on the
@@ -131,7 +147,8 @@ reply = client.messages.create(
   - cache breakpoints on `system` or `tools`, more than four breakpoints, or `1h` after `5m`,
   - a cache breakpoint on an image of the final user message with no text block before it: Claude Code drops an
     image's breakpoint, so it moves to the nearest earlier text block.
-- **Limits.** HTTP 429 once every profile the call may use is out of quota. The server never falls back to a paid API.
+- **Limits.** HTTP 429 once every profile the call may use is out of quota. The server never falls back to a paid API;
+  a TeamClaude profile bills whatever TeamClaude's pool holds.
   `/v1/health` shows each profile's last reported quota.
 
 ## Docs
