@@ -139,6 +139,8 @@ accounts and models serve these calls, API keys included. See the [reference](do
 - **Cache what you reuse.** Unmarked requests are not prompt-cached. Put `cache_control: {"type": "ephemeral"}` on the
   last shared block, or set top-level `cache_control` in multi-turn calls.
 - **Timeout.** Set the SDK `timeout` to 1800 s. The 600 s default is shorter than the server's twenty-minute limit.
+- **Open calls.** Keep at most about 96 calls open at once. Calls beyond the free slots wait in the server, but macOS
+  caps its listen backlog at 128 connections (`kern.ipc.somaxconn`) and resets connections past it.
 - **Unsupported input returns HTTP 400.** That's any field not listed in the [reference](docs/reference.md), notably:
   - a final assistant message (prefill), image URLs, and document or PDF blocks,
   - `metadata`, `stop_sequences`, `service_tier`, `inference_geo`, and non-default `temperature`,
